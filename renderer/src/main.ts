@@ -360,30 +360,33 @@ function parse_field_data(buffer: ArrayBuffer) {
 
   const sliceSize = sliceWidth * sliceHeight;
 
-  // 2D slice data
-  const sliceBx = new Float32Array(buffer, offset, sliceSize);
-  offset += sliceSize * 4;
-  const sliceBz = new Float32Array(buffer, offset, sliceSize);
-  offset += sliceSize * 4;
-  const sliceMagnitude = new Float32Array(buffer, offset, sliceSize);
-  offset += sliceSize * 4;
+  // Helper to read Float32Array with potentially unaligned offset
+  function readFloat32Array(count: number): Float32Array {
+    const arr = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      arr[i] = view.getFloat32(offset, true);
+      offset += 4;
+    }
+    return arr;
+  }
+
+  // 2D slice data (use helper to handle unaligned offsets)
+  const sliceBx = readFloat32Array(sliceSize);
+  const sliceBz = readFloat32Array(sliceSize);
+  const sliceMagnitude = readFloat32Array(sliceSize);
 
   // 3D arrows
   const numArrows = view.getUint32(offset, true); offset += 4;
 
-  const arrowPositions = new Float32Array(buffer, offset, numArrows * 3);
-  offset += numArrows * 3 * 4;
-  const arrowVectors = new Float32Array(buffer, offset, numArrows * 3);
-  offset += numArrows * 3 * 4;
-  const arrowMagnitudes = new Float32Array(buffer, offset, numArrows);
-  offset += numArrows * 4;
+  const arrowPositions = readFloat32Array(numArrows * 3);
+  const arrowVectors = readFloat32Array(numArrows * 3);
+  const arrowMagnitudes = readFloat32Array(numArrows);
 
   // 1D line
   const linePoints = view.getUint32(offset, true); offset += 4;
 
-  const lineZ = new Float32Array(buffer, offset, linePoints);
-  offset += linePoints * 4;
-  const lineBz = new Float32Array(buffer, offset, linePoints);
+  const lineZ = readFloat32Array(linePoints);
+  const lineBz = readFloat32Array(linePoints);
 
   return {
     slice: {
@@ -1111,6 +1114,10 @@ function update_mesh(buffer: ArrayBuffer) {
   const header = new Uint8Array(buffer, 0, 8);
   const header_5 = String.fromCharCode(...header.slice(0, 5));
   const header_8 = String.fromCharCode(...header);
+  
+  // Helper to check header bytes directly (avoids string null-byte issues)
+  const isFDTD = header[0] === 70 && header[1] === 68 && header[2] === 84 && header[3] === 68 && header[4] === 0; // "FDTD\0"
+  const isFIELD = header[0] === 70 && header[1] === 73 && header[2] === 69 && header[3] === 76 && header[4] === 68; // "FIELD"
 
   // Handle view config
   if (header_8.startsWith('VIEW')) {
@@ -1156,7 +1163,7 @@ function update_mesh(buffer: ArrayBuffer) {
   }
 
   // Handle FDTD study results
-  if (header_5 === 'FDTD\0') {
+  if (isFDTD) {
     const fdtd_data = parse_fdtd_data(buffer);
     console.log(`FDTD data: ${fdtd_data.grid_size[0]}x${fdtd_data.grid_size[1]}x${fdtd_data.grid_size[2]} grid, ${fdtd_data.num_steps} steps, ${fdtd_data.resonances.length} resonances`);
     draw_oscilloscope(fdtd_data);
@@ -1177,7 +1184,7 @@ function update_mesh(buffer: ArrayBuffer) {
     return;
   }
 
-  if (header_5 === 'FIELD') {
+  if (isFIELD) {
     // Parse and display field data
     const fieldData = parse_field_data(buffer);
     console.log(`Field data: ${fieldData.slice.width}x${fieldData.slice.height} slice, ${fieldData.arrows.positions.length / 3} arrows`);
