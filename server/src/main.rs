@@ -980,6 +980,11 @@ fn try_compute_nanovna_sweep(lua: &mlua::Lua, content: &str) -> Option<nanovna::
     let wire_diameter: f64 = nanovna_table.get("wire_diameter").unwrap_or(0.5);
     let coil_resistance: f64 = nanovna_table.get("coil_resistance").unwrap_or(0.5);
 
+    // Get optional resonator coupling configuration
+    let resonator_radius: Option<f64> = nanovna_table.get("resonator_radius").ok();
+    let resonator_distance: f64 = nanovna_table.get("resonator_distance").unwrap_or(10.0);
+    let resonator_resistance: f64 = nanovna_table.get("resonator_resistance").unwrap_or(0.1);
+
     let config = nanovna::NanoVNAConfig {
         f_start,
         f_stop,
@@ -989,15 +994,22 @@ fn try_compute_nanovna_sweep(lua: &mlua::Lua, content: &str) -> Option<nanovna::
         wire_diameter,
         coil_resistance,
         parasitic_capacitance_pf: None,
-        resonator_radius: None,
-        resonator_distance: 10.0,
-        resonator_resistance: 0.1,
+        resonator_radius,
+        resonator_distance,
+        resonator_resistance,
     };
 
-    info!(
-        "Computing NanoVNA sweep: {:.2} MHz - {:.2} MHz, {} points, R={:.1}mm, N={}",
-        f_start / 1e6, f_stop / 1e6, num_points, coil_radius, num_turns
-    );
+    if let Some(res_r) = resonator_radius {
+        info!(
+            "Computing NanoVNA sweep: {:.2} MHz - {:.2} MHz, {} points, R={:.1}mm, N={}, coupled to resonator R={:.1}mm",
+            f_start / 1e6, f_stop / 1e6, num_points, coil_radius, num_turns, res_r
+        );
+    } else {
+        info!(
+            "Computing NanoVNA sweep: {:.2} MHz - {:.2} MHz, {} points, R={:.1}mm, N={}",
+            f_start / 1e6, f_stop / 1e6, num_points, coil_radius, num_turns
+        );
+    }
 
     let sweep = nanovna::compute_frequency_sweep(&config);
 
