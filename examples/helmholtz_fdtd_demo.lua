@@ -159,7 +159,7 @@ FdtdStudy = {
   monitor_offset = {0, 0, 0},
 
   -- Field plane for visualization
-  field_plane = "XZ",     -- XZ slice through center
+  field_plane = "XY",     -- XY slice through center
 }
 
 -- ============================================================================
@@ -175,6 +175,10 @@ NanoVNA = {
   num_turns = CouplingCoil.turns,
   wire_diameter = CouplingCoil.wire_diameter,
   coil_resistance = CouplingCoil.resistance,
+  -- Enable coupled resonator model for BLGR
+  resonator_radius = Resonator.outer_radius,
+  resonator_distance = CouplingCoil.distance,
+  resonator_resistance = 0.05,  -- Low resistance for copper resonator
 }
 
 -- ============================================================================
@@ -196,7 +200,7 @@ GaussMeter({Coil.gap/4, 0, 0}, {
 })
 
 -- MagneticFieldPlane for 2D B-field visualization
-MagneticFieldPlane("XZ", 0, {
+MagneticFieldPlane("XY", 0, {
   quantity = "B",
   style = "streamlines",
   scale = "linear",
