@@ -54,10 +54,10 @@ Microscope.width = Microscope.WellPlate.width + 20
 Microscope.WellPlate.offset = Microscope.height - 2
 
 HolderAdapter = {
-  length = 128,
-  width = 86,
+  length = 128 + 1,
+  width = 86 + 1,
   tolerance = 0.5,
-  height = 8,
+  height = 10,
   offset = 1
 }
 
@@ -72,7 +72,8 @@ Transducer = {
 }
 
 Lid = {
-  diameter = 34,
+  diameter = 35,
+  inner_diameter = 32,
   height = 5,
   wall_thickness = 1.5,
 }
@@ -185,7 +186,7 @@ Damper = {
 Lid.outer = cylinder(Lid.diameter / 2, Lid.height)
 
 Lid.inner = cylinder(
-  Lid.diameter / 2 - Lid.wall_thickness,
+  Lid.inner_diameter / 2,
   Lid.height - Lid.wall_thickness
 )
 
