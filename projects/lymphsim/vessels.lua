@@ -6,13 +6,13 @@ local Vessels = {}
 
 -- Vessel network configuration
 Vessels.config = {
-  -- Vessel radii (meters)
-  artery_radius = 0.008,
-  vein_radius = 0.006,
-  capillary_radius = 0.002,
-  glymphatic_radius = 0.003,
-  lymph_vessel_radius = 0.004,
-  lymph_node_radius = 0.012,
+  -- Vessel radii (millimeters)
+  artery_radius = 8,
+  vein_radius = 6,
+  capillary_radius = 2,
+  glymphatic_radius = 3,
+  lymph_vessel_radius = 4,
+  lymph_node_radius = 12,
   
   -- Colors (RGBA)
   arterial_color = {0.9, 0.2, 0.2, 0.8},    -- Bright red
@@ -27,33 +27,33 @@ function Vessels.create_vascular()
   local segments = {}
   
   -- Aorta (main artery) - runs down center
-  table.insert(segments, cylinder(c.artery_radius, 0.25)
+  table.insert(segments, cylinder(c.artery_radius, 250)
     :rotate(0, 90, 0)  -- Align along X
-    :at(-0.12, 0.02, 0)
+    :at(-120, 20, 0)
     :color(c.arterial_color[1], c.arterial_color[2], c.arterial_color[3], c.arterial_color[4])
     :name("aorta"))
   
   -- Vena cava (main vein) - parallel to aorta
-  table.insert(segments, cylinder(c.vein_radius, 0.25)
+  table.insert(segments, cylinder(c.vein_radius, 250)
     :rotate(0, 90, 0)
-    :at(-0.12, -0.02, 0)
+    :at(-120, -20, 0)
     :color(c.venous_color[1], c.venous_color[2], c.venous_color[3], c.venous_color[4])
     :name("vena_cava"))
   
   -- Branching vessels (capillary bed simulation)
   for i = 1, 5 do
-    local x_pos = -0.10 + (i - 1) * 0.05
+    local x_pos = -100 + (i - 1) * 50
     
     -- Arterial branches (going outward)
-    table.insert(segments, cylinder(c.capillary_radius, 0.06)
-      :at(x_pos, 0.02, 0)
+    table.insert(segments, cylinder(c.capillary_radius, 60)
+      :at(x_pos, 20, 0)
       :rotate(0, 0, 40)
       :color(c.arterial_color[1], c.arterial_color[2], c.arterial_color[3], c.arterial_color[4])
       :name("arterial_branch_" .. i))
     
     -- Venous return branches
-    table.insert(segments, cylinder(c.capillary_radius, 0.06)
-      :at(x_pos, -0.02, 0)
+    table.insert(segments, cylinder(c.capillary_radius, 60)
+      :at(x_pos, -20, 0)
       :rotate(0, 0, -40)
       :color(c.venous_color[1], c.venous_color[2], c.venous_color[3], c.venous_color[4])
       :name("venous_branch_" .. i))
@@ -68,10 +68,10 @@ function Vessels.create_glymphatic()
   local segments = {}
   
   -- Glymphatic vessels primarily in head region
-  local head_z = 0.12
+  local head_z = 120
   
   -- Central drainage channel
-  table.insert(segments, cylinder(c.glymphatic_radius, 0.10)
+  table.insert(segments, cylinder(c.glymphatic_radius, 100)
     :at(0, 0, head_z)
     :rotate(0, 90, 0)
     :color(c.glymphatic_color[1], c.glymphatic_color[2], c.glymphatic_color[3], c.glymphatic_color[4])
@@ -81,25 +81,25 @@ function Vessels.create_glymphatic()
   for i = 1, 3 do
     local angle = (i - 1) * 120
     local rad = math.rad(angle)
-    local y_off = 0.03 * math.cos(rad)
-    local z_off = 0.03 * math.sin(rad)
+    local y_off = 30 * math.cos(rad)
+    local z_off = 30 * math.sin(rad)
     
-    table.insert(segments, cylinder(c.glymphatic_radius * 0.7, 0.06)
-      :at(-0.02, y_off, head_z + z_off)
+    table.insert(segments, cylinder(c.glymphatic_radius * 0.7, 60)
+      :at(-20, y_off, head_z + z_off)
       :rotate(0, 90, 0)
       :color(c.glymphatic_color[1], c.glymphatic_color[2], c.glymphatic_color[3], c.glymphatic_color[4])
       :name("perivascular_" .. i))
   end
   
   -- Draining channels to cervical lymphatics
-  table.insert(segments, cylinder(c.glymphatic_radius, 0.08)
-    :at(0, 0.02, head_z - 0.04)
+  table.insert(segments, cylinder(c.glymphatic_radius, 80)
+    :at(0, 20, head_z - 40)
     :rotate(20, 0, 0)
     :color(c.glymphatic_color[1], c.glymphatic_color[2], c.glymphatic_color[3], c.glymphatic_color[4])
     :name("glymphatic_drain_L"))
   
-  table.insert(segments, cylinder(c.glymphatic_radius, 0.08)
-    :at(0, -0.02, head_z - 0.04)
+  table.insert(segments, cylinder(c.glymphatic_radius, 80)
+    :at(0, -20, head_z - 40)
     :rotate(-20, 0, 0)
     :color(c.glymphatic_color[1], c.glymphatic_color[2], c.glymphatic_color[3], c.glymphatic_color[4])
     :name("glymphatic_drain_R"))
@@ -113,26 +113,26 @@ function Vessels.create_lymphatic()
   local segments = {}
   
   -- Main lymphatic ducts (thoracic duct)
-  table.insert(segments, cylinder(c.lymph_vessel_radius, 0.20)
+  table.insert(segments, cylinder(c.lymph_vessel_radius, 200)
     :rotate(0, 90, 0)
-    :at(-0.08, 0.05, -0.02)
+    :at(-80, 50, -20)
     :color(c.lymphatic_color[1], c.lymphatic_color[2], c.lymphatic_color[3], c.lymphatic_color[4])
     :name("thoracic_duct"))
   
   -- Right lymphatic duct
-  table.insert(segments, cylinder(c.lymph_vessel_radius * 0.8, 0.15)
+  table.insert(segments, cylinder(c.lymph_vessel_radius * 0.8, 150)
     :rotate(0, 90, 0)
-    :at(-0.06, -0.05, -0.02)
+    :at(-60, -50, -20)
     :color(c.lymphatic_color[1], c.lymphatic_color[2], c.lymphatic_color[3], c.lymphatic_color[4])
     :name("right_lymphatic_duct"))
   
   -- Lymph nodes (use short cylinders instead of spheres)
   local node_positions = {
-    {0, 0.08, 0.06},       -- Cervical (neck)
-    {-0.05, 0.10, -0.01},  -- Axillary (armpit)
-    {-0.05, -0.10, -0.01}, -- Axillary right
-    {0.02, 0.06, -0.06},   -- Inguinal (groin)
-    {0.02, -0.06, -0.06},  -- Inguinal right
+    {0, 80, 60},       -- Cervical (neck)
+    {-50, 100, -10},   -- Axillary (armpit)
+    {-50, -100, -10},  -- Axillary right
+    {20, 60, -60},     -- Inguinal (groin)
+    {20, -60, -60},    -- Inguinal right
   }
   
   for i, pos in ipairs(node_positions) do
@@ -145,18 +145,18 @@ function Vessels.create_lymphatic()
   
   -- Collecting vessels (peripheral to nodes)
   for i = 1, 4 do
-    local x_pos = -0.08 + (i - 1) * 0.04
+    local x_pos = -80 + (i - 1) * 40
     
     -- Upper body collectors
-    table.insert(segments, cylinder(c.lymph_vessel_radius * 0.6, 0.05)
-      :at(x_pos, 0.07, 0.02)
+    table.insert(segments, cylinder(c.lymph_vessel_radius * 0.6, 50)
+      :at(x_pos, 70, 20)
       :rotate(30, 20, 0)
       :color(c.lymphatic_color[1], c.lymphatic_color[2], c.lymphatic_color[3], c.lymphatic_color[4])
       :name("lymph_collector_upper_" .. i))
     
     -- Lower body collectors
-    table.insert(segments, cylinder(c.lymph_vessel_radius * 0.6, 0.04)
-      :at(x_pos, 0.05, -0.04)
+    table.insert(segments, cylinder(c.lymph_vessel_radius * 0.6, 40)
+      :at(x_pos, 50, -40)
       :rotate(-30, 10, 0)
       :color(c.lymphatic_color[1], c.lymphatic_color[2], c.lymphatic_color[3], c.lymphatic_color[4])
       :name("lymph_collector_lower_" .. i))

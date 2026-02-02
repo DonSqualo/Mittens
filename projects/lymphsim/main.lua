@@ -41,12 +41,12 @@ local lymphsim = assembly("LymphSim", {
   version = "0.1.0",
 })
 
--- Set up the view - camera closer to see details
--- Bath is about 2m x 0.6m, centered around (1.02, 0.32, 0.37)
+-- Set up the view - camera in mm coordinates
+-- Bath is 2000mm x 600mm, centered around (1020, 320, 370)
 view({
   camera = {
-    position = {3.5, 2.5, 2.0},  -- Closer and higher view
-    target = {1.0, 0.3, 0.2},    -- Bath center
+    position = {3500, 2500, 2000},  -- Closer and higher view
+    target = {1000, 300, 200},      -- Bath center
     up = {0, 0, 1},
   },
   background = {0.1, 0.1, 0.15, 1.0},

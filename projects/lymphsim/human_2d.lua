@@ -4,13 +4,13 @@
 
 local Human = {}
 
--- Human body dimensions (cross-section, meters)
+-- Human body dimensions (cross-section, millimeters)
 Human.config = {
-  body_width = 0.35,     -- Y: shoulder width (diameter)
-  body_depth = 0.20,     -- Z: front-to-back (diameter)
-  body_length = 0.04,    -- X: slice thickness
-  head_radius = 0.08,    -- Head circle radius
-  head_offset_z = 0.12,  -- Head center above body center
+  body_width = 350,      -- Y: shoulder width (diameter)
+  body_depth = 200,      -- Z: front-to-back (diameter)
+  body_length = 40,      -- X: slice thickness
+  head_radius = 80,      -- Head circle radius
+  head_offset_z = 120,   -- Head center above body center
 }
 
 --- Create simplified 2D body cross-section

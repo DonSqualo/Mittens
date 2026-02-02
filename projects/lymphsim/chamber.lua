@@ -3,15 +3,15 @@
 
 local Chamber = {}
 
--- Bath dimensions (meters)
+-- Bath dimensions (millimeters - Mittens default unit)
 Chamber.config = {
-  length = 2.0,        -- X: bath length
-  width = 0.6,         -- Y: bath width  
-  depth = 0.4,         -- Z: water depth
-  wall_thickness = 0.02,
-  water_level = 0.35,  -- Z: water surface
-  speaker_radius = 0.08,
-  speaker_depth = 0.05,
+  length = 2000,        -- X: bath length (2m)
+  width = 600,          -- Y: bath width (0.6m)
+  depth = 400,          -- Z: water depth (0.4m)
+  wall_thickness = 20,
+  water_level = 350,    -- Z: water surface
+  speaker_radius = 80,
+  speaker_depth = 50,
 }
 
 --- Create the bath shell (outer walls minus inner cavity)
