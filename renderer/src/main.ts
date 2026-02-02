@@ -22,6 +22,35 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.05;
 controls.target.set(0, 0, 20); // Look at slightly above origin
 
+// Restore camera from localStorage (survives page reloads)
+const saved_camera = localStorage.getItem('mittens_camera');
+if (saved_camera) {
+  try {
+    const state = JSON.parse(saved_camera);
+    camera.position.set(state.pos[0], state.pos[1], state.pos[2]);
+    controls.target.set(state.tgt[0], state.tgt[1], state.tgt[2]);
+    if (state.fov) camera.fov = state.fov;
+    camera.updateProjectionMatrix();
+    controls.update();
+    console.log('Restored camera from localStorage');
+  } catch (e) {
+    console.warn('Failed to restore camera:', e);
+  }
+}
+
+// Save camera to localStorage on user interaction
+controls.addEventListener('end', () => {
+  const state = {
+    pos: [camera.position.x, camera.position.y, camera.position.z],
+    tgt: [controls.target.x, controls.target.y, controls.target.z],
+    fov: camera.fov
+  };
+  localStorage.setItem('mittens_camera', JSON.stringify(state));
+});
+
+// Track last Lua camera to avoid resetting on unchanged reloads
+let last_lua_camera_key: string | null = null;
+
 // Current mesh and field visualizations
 let current_mesh: THREE.Mesh | null = null;
 let arrows_group: THREE.Group | null = null;
@@ -932,14 +961,23 @@ function update_mesh(buffer: ArrayBuffer) {
       const tgt_z = view.getFloat32(30, true);
       const fov = view.getFloat32(34, true);
 
-      camera.position.set(cam_x, cam_y, cam_z);
-      controls.target.set(tgt_x, tgt_y, tgt_z);
-      camera.fov = fov;
-      camera.updateProjectionMatrix();
-      controls.update();
-      console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}`);
+      // Only apply Lua camera if it changed (preserves user manipulation)
+      const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)}`;
+      if (lua_key !== last_lua_camera_key) {
+        camera.position.set(cam_x, cam_y, cam_z);
+        controls.target.set(tgt_x, tgt_y, tgt_z);
+        camera.fov = fov;
+        camera.updateProjectionMatrix();
+        controls.update();
+        last_lua_camera_key = lua_key;
+        // Clear localStorage when Lua explicitly sets camera
+        localStorage.removeItem('mittens_camera');
+        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}`);
+      } else {
+        console.log(`View config: flat_shading=${flat_shading}, camera unchanged (keeping user position)`);
+      }
     } else {
-      console.log(`View config: flat_shading=${flat_shading}, using default camera`);
+      console.log(`View config: flat_shading=${flat_shading}, no camera specified`);
     }
     return;
   }
