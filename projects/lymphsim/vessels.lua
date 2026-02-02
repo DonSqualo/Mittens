@@ -1,5 +1,6 @@
 -- LymphSim: Vessel Networks
 -- Three circulatory systems: vascular (red), glymphatic (blue), lymphatic (green)
+-- Note: Avoiding small spheres due to Manifold numerical issues
 
 local Vessels = {}
 
@@ -20,43 +21,10 @@ Vessels.config = {
   lymphatic_color = {0.2, 0.8, 0.3, 0.8},    -- Green
 }
 
---- Create a vessel segment (cylinder between two points)
--- @param start_pos {x, y, z} start position
--- @param end_pos {x, y, z} end position
--- @param radius tube radius
--- @param color {r, g, b, a} color
--- @param name segment name
-local function create_vessel_segment(start_pos, end_pos, radius, color, name)
-  -- Calculate length and direction
-  local dx = end_pos[1] - start_pos[1]
-  local dy = end_pos[2] - start_pos[2]
-  local dz = end_pos[3] - start_pos[3]
-  local length = math.sqrt(dx*dx + dy*dy + dz*dz)
-  
-  if length < 0.001 then return nil end
-  
-  -- Calculate rotation angles to align cylinder along direction
-  -- Cylinder extends along +Z by default
-  local horizontal = math.sqrt(dx*dx + dy*dy)
-  local pitch = math.deg(math.atan2(horizontal, dz))  -- Rotation around Y
-  local yaw = math.deg(math.atan2(dx, dy))            -- Rotation around Z
-  
-  local segment = cylinder(radius, length)
-    :at(start_pos[1], start_pos[2], start_pos[3])
-    :rotate(pitch, 0, -yaw)
-    :color(color[1], color[2], color[3], color[4])
-    :name(name)
-  
-  return segment
-end
-
 --- Create vascular network (arteries and veins)
 function Vessels.create_vascular()
   local c = Vessels.config
   local segments = {}
-  
-  -- Main vessels running along body (X direction)
-  -- Centered in body at Y=0, Z=0 (relative to human center)
   
   -- Aorta (main artery) - runs down center
   table.insert(segments, cylinder(c.artery_radius, 0.25)
@@ -100,9 +68,6 @@ function Vessels.create_glymphatic()
   local segments = {}
   
   -- Glymphatic vessels primarily in head region
-  -- Perivascular spaces around arteries
-  
-  -- Main glymphatic channels in head (at head_offset_z ~ 0.12)
   local head_z = 0.12
   
   -- Central drainage channel
@@ -112,7 +77,7 @@ function Vessels.create_glymphatic()
     :color(c.glymphatic_color[1], c.glymphatic_color[2], c.glymphatic_color[3], c.glymphatic_color[4])
     :name("glymphatic_central"))
   
-  -- Perivascular spaces (ring around vessels)
+  -- Perivascular spaces
   for i = 1, 3 do
     local angle = (i - 1) * 120
     local rad = math.rad(angle)
@@ -147,8 +112,6 @@ function Vessels.create_lymphatic()
   local c = Vessels.config
   local segments = {}
   
-  -- Lymphatic vessels throughout body, draining toward lymph nodes
-  
   -- Main lymphatic ducts (thoracic duct)
   table.insert(segments, cylinder(c.lymph_vessel_radius, 0.20)
     :rotate(0, 90, 0)
@@ -163,18 +126,19 @@ function Vessels.create_lymphatic()
     :color(c.lymphatic_color[1], c.lymphatic_color[2], c.lymphatic_color[3], c.lymphatic_color[4])
     :name("right_lymphatic_duct"))
   
-  -- Lymph nodes (clusters)
+  -- Lymph nodes (use short cylinders instead of spheres)
   local node_positions = {
-    {0, 0.08, 0.06},      -- Cervical (neck)
-    {-0.05, 0.10, -0.01}, -- Axillary (armpit)
+    {0, 0.08, 0.06},       -- Cervical (neck)
+    {-0.05, 0.10, -0.01},  -- Axillary (armpit)
     {-0.05, -0.10, -0.01}, -- Axillary right
-    {0.02, 0.06, -0.06},  -- Inguinal (groin)
-    {0.02, -0.06, -0.06}, -- Inguinal right
+    {0.02, 0.06, -0.06},   -- Inguinal (groin)
+    {0.02, -0.06, -0.06},  -- Inguinal right
   }
   
   for i, pos in ipairs(node_positions) do
-    table.insert(segments, sphere(c.lymph_node_radius)
-      :at(pos[1], pos[2], pos[3])
+    -- Use a short fat cylinder as a node (approximates sphere)
+    table.insert(segments, cylinder(c.lymph_node_radius, c.lymph_node_radius * 1.5)
+      :at(pos[1], pos[2], pos[3] - c.lymph_node_radius * 0.75)
       :color(c.lymphatic_color[1], c.lymphatic_color[2] * 0.8, c.lymphatic_color[3] * 0.8, c.lymphatic_color[4])
       :name("lymph_node_" .. i))
   end
@@ -211,9 +175,6 @@ function Vessels.create()
 end
 
 --- Position vessels relative to human center
--- @param human_center_x X position of human
--- @param human_center_y Y position of human
--- @param human_center_z Z position of human
 function Vessels.position_in_human(human_center_x, human_center_y, human_center_z)
   local vessels = Vessels.create()
     :at(human_center_x, human_center_y, human_center_z)
