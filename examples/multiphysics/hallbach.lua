@@ -605,8 +605,8 @@ export_stl("holder_adapter.stl", HolderAdapter.model)
 
 view({
   camera = "isometric",
-  distance = 150,
-  target = { 0, 0, Ring.height / 2 },
+  distance = 280,
+  target = { 0, 0, 5 },
   theme = "dark",
   axes = { show = true, size = 20 },
 })
