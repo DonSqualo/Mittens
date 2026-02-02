@@ -6,8 +6,8 @@ local View = {}
 -- Current view state
 View._state = {
   camera = {
-    position = {100, 100, 100},
-    target = {0, 0, 0},
+    position = {-80, -150, 80},  -- Y axis into screen, Z up
+    target = {0, 0, 20},
     up = {0, 0, 1},
     fov = 45,
     near = 0.1,
@@ -39,29 +39,10 @@ View._state = {
 function View.view(config)
   if not config then return View._state end
 
-  -- Camera preset positions
-  local presets = {
-    isometric = {position = {100, 100, 100}, target = {0, 0, 0}},
-    front = {position = {0, -200, 0}, target = {0, 0, 0}},
-    back = {position = {0, 200, 0}, target = {0, 0, 0}},
-    left = {position = {-200, 0, 0}, target = {0, 0, 0}},
-    right = {position = {200, 0, 0}, target = {0, 0, 0}},
-    top = {position = {0, 0, 200}, target = {0, 0, 0}},
-    bottom = {position = {0, 0, -200}, target = {0, 0, 0}},
-  }
-
-  -- Apply camera preset or custom position
+  -- Apply camera position
   if config.camera then
-    if type(config.camera) == "string" then
-      local preset = presets[config.camera]
-      if preset then
-        View._state.camera.position = preset.position
-        View._state.camera.target = preset.target
-      end
-    else
-      for k, v in pairs(config.camera) do
-        View._state.camera[k] = v
-      end
+    for k, v in pairs(config.camera) do
+      View._state.camera[k] = v
     end
   end
 
@@ -274,8 +255,8 @@ end
 function View.reset()
   View._state = {
     camera = {
-      position = {100, 100, 100},
-      target = {0, 0, 0},
+      position = {-80, -150, 80},
+      target = {0, 0, 20},
       up = {0, 0, 1},
       fov = 45,
       near = 0.1,
