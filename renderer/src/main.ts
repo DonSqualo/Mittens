@@ -28,6 +28,9 @@ let arrows_group: THREE.Group | null = null;
 let field_plane: THREE.Mesh | null = null;
 let flat_shading: boolean = true;
 
+// Track last camera state from Lua to avoid resetting on unchanged refreshes
+let last_lua_camera: string | null = null;
+
 // Measurement markers (GaussMeter, Hydrophone)
 let measurement_markers: THREE.Group | null = null;
 
@@ -932,14 +935,21 @@ function update_mesh(buffer: ArrayBuffer) {
       const tgt_z = view.getFloat32(30, true);
       const fov = view.getFloat32(34, true);
 
-      camera.position.set(cam_x, cam_y, cam_z);
-      controls.target.set(tgt_x, tgt_y, tgt_z);
-      camera.fov = fov;
-      camera.updateProjectionMatrix();
-      controls.update();
-      console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}`);
+      // Only apply camera if Lua values changed (preserves user manipulation on refresh)
+      const camera_key = `${cam_x},${cam_y},${cam_z},${tgt_x},${tgt_y},${tgt_z},${fov}`;
+      if (camera_key !== last_lua_camera) {
+        camera.position.set(cam_x, cam_y, cam_z);
+        controls.target.set(tgt_x, tgt_y, tgt_z);
+        camera.fov = fov;
+        camera.updateProjectionMatrix();
+        controls.update();
+        last_lua_camera = camera_key;
+        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}`);
+      } else {
+        console.log(`View config: flat_shading=${flat_shading}, camera unchanged (keeping user position)`);
+      }
     } else {
-      console.log(`View config: flat_shading=${flat_shading}, using default camera`);
+      console.log(`View config: flat_shading=${flat_shading}, no camera specified`);
     }
     return;
   }
