@@ -603,10 +603,13 @@ export_stl("holder_adapter.stl", HolderAdapter.model)
 -- View Configuration
 -- ===========================
 
+-- Camera at distance ~280 from target (0,0,5), isometric angle
+-- Direction vector (1,1,1) normalized * 280 ≈ (162, 162, 162) + target offset
 view({
-  camera = "isometric",
-  distance = 280,
-  target = { 0, 0, 5 },
+  camera = {
+    position = { 160, 160, 165 },
+    target = { 0, 0, 5 },
+  },
   theme = "dark",
   axes = { show = true, size = 20 },
 })
