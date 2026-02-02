@@ -1,5 +1,6 @@
 -- hallbach.lua
 -- Halbach array magnet holder system for cell culture studies
+-- test change
 
 local Mittens = require("stdlib")
 
