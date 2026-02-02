@@ -535,6 +535,49 @@ DeepWellRing.model = difference(
   cylinder(Well.deep_radius + DeepWellRing.width, DeepWellRing.height),
   cylinder(Well.deep_radius, DeepWellRing.height)
 ):at(0, 0, Assembly.total_height)
+
+-- ===========================
+-- Geometry: Zeiss Plate Holder Adapter
+-- Fits standard 96-well plate holder dimensions
+-- ===========================
+
+Microscope = {
+  height = 6,
+  WellPlate = {
+    length = 127.76,
+    width = 85.48,
+  }
+}
+Microscope.length = Microscope.WellPlate.length + 20
+Microscope.width = Microscope.WellPlate.width + 20
+Microscope.WellPlate.offset = Microscope.height - 2
+
+Microscope.model = difference(
+  box(Microscope.length, Microscope.width, Microscope.height):centerXY(),
+  box(Microscope.WellPlate.length, Microscope.WellPlate.width, Microscope.height):centerXY():at(0, 0,
+    Microscope.height - Microscope.WellPlate.offset),
+  box(Microscope.WellPlate.length - Microscope.WellPlate.offset,
+    Microscope.WellPlate.width - Microscope.WellPlate.offset,
+    Microscope.height):centerXY()
+):at(0, 0, -Microscope.height - Ring.platform_height)
+  :material(material("steel"))
+
+HolderAdapter = {
+  length = 128,
+  width = 86,
+  tolerance = 0.5,
+  height = 8,
+  offset = 1,
+}
+
+-- Cutout sized for the Halbach inner ring platform
+HolderAdapter.cutout_radius = (Ring.total_hole_width + Config.gap) / 2
+
+HolderAdapter.model = difference(
+  box(HolderAdapter.length, HolderAdapter.width, HolderAdapter.height):centerXY(),
+  cylinder(HolderAdapter.cutout_radius, HolderAdapter.height):at(0, 0, HolderAdapter.offset),
+  cylinder(Ring.center_hole_radius, HolderAdapter.height)
+):at(0, 0, -HolderAdapter.height - Ring.platform_height)
 -- ===========================
 -- Active Model
 -- ===========================
@@ -545,12 +588,16 @@ local assembly = group("assembly", {
   -- DeepWell.model:at(0, 0, 18),
   DeepWellRing.model:color(1, 0, 0),
   CapInner.model,
+  Microscope.model,
+  HolderAdapter.model,
 })
 
 Mittens.register(assembly)
 
 export_stl("cap_inner.stl", CapInner.model)
 export_stl("tight_fit_adapter.stl", DeepWellRing.model)
+export_stl("microscope_holder.stl", Microscope.model)
+export_stl("holder_adapter.stl", HolderAdapter.model)
 
 -- ===========================
 -- View Configuration
