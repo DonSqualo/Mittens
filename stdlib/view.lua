@@ -14,6 +14,7 @@ View._state = {
     far = 10000,
     projection = "perspective",  -- perspective, orthographic
   },
+  camera_explicit = false,  -- true if user explicitly set camera
   visible = {},
   hidden = {},
   clip = nil,
@@ -52,6 +53,7 @@ function View.view(config)
 
   -- Apply camera preset or custom position
   if config.camera then
+    View._state.camera_explicit = true
     if type(config.camera) == "string" then
       local preset = presets[config.camera]
       if preset then
@@ -156,6 +158,7 @@ end
 -- @param z Z position
 function View.camera_position(x, y, z)
   View._state.camera.position = {x, y, z}
+  View._state.camera_explicit = true
 end
 
 --- Set camera target (look-at point)
@@ -164,12 +167,14 @@ end
 -- @param z Z target
 function View.camera_target(x, y, z)
   View._state.camera.target = {x, y, z}
+  View._state.camera_explicit = true
 end
 
 --- Set field of view
 -- @param fov FOV in degrees
 function View.camera_fov(fov)
   View._state.camera.fov = fov
+  View._state.camera_explicit = true
 end
 
 --- Use orthographic projection
@@ -251,15 +256,19 @@ end
 --- Serialize view state for saving/transmission
 -- @return Serialized view state
 function View.serialize()
-  return {
+  local result = {
     flat_shading = View._state.render.flat_shading,
     circular_segments = View._state.render.circular_segments,
-    camera = {
+  }
+  -- Only include camera if explicitly set by user
+  if View._state.camera_explicit then
+    result.camera = {
       position = View._state.camera.position,
       target = View._state.camera.target,
       fov = View._state.camera.fov,
-    },
-  }
+    }
+  end
+  return result
 end
 
 --- Load view state
@@ -282,6 +291,7 @@ function View.reset()
       far = 10000,
       projection = "perspective",
     },
+    camera_explicit = false,
     visible = {},
     hidden = {},
     clip = nil,
