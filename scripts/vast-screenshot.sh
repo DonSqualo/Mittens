@@ -1,19 +1,24 @@
 #!/bin/bash
 # Take a screenshot from Vast.ai GPU instance
-# Usage: ./vast-screenshot.sh [--restart] [output.png]
+# Usage: ./vast-screenshot.sh [--restart] [--lua FILE] [output.png]
 #
 # Options:
-#   --restart   Kill and restart server/renderer (for TS/Rust changes)
-#               Not needed for Lua changes (server has file watcher)
+#   --restart      Kill and restart server/renderer (for TS/Rust changes)
+#   --lua FILE     Lua file to load (relative to Mittens/, e.g. examples/my_script.lua)
+#                  Default: project/lymph_bath.lua
+#
+# Note: Lua changes require --restart to take effect (server loads file at startup)
 
 set -e
 
 RESTART=false
+LUA_FILE="project/lymph_bath.lua"
 OUTPUT="screenshot_$(date +%H%M%S).png"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --restart) RESTART=true; shift ;;
+    --lua) LUA_FILE="$2"; shift 2 ;;
     *) OUTPUT="$1"; shift ;;
   esac
 done
@@ -41,21 +46,21 @@ SSH_CMD="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p $SSH_PORT root@
 echo "📡 Found instance $INSTANCE_ID at $SSH_HOST:$SSH_PORT"
 
 if [ "$RESTART" = true ]; then
-  echo "🔄 Restarting services..."
-  $SSH_CMD 'bash -s' << 'EOF'
+  echo "🔄 Restarting services with Lua file: $LUA_FILE"
+  $SSH_CMD "bash -s" << EOF
 pkill -f scriptcad-server 2>/dev/null || true
 pkill -f vite 2>/dev/null || true
 sleep 1
 
-export LD_LIBRARY_PATH=$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
+export LD_LIBRARY_PATH=\$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
 cd /root/Mittens && git pull
 
 # Server runs from ./server dir with relative path to project  
-export LD_LIBRARY_PATH=$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
-(cd /root/Mittens/server && ./target/release/scriptcad-server ../project/lymph_bath.lua > /tmp/server.log 2>&1) &
+export LD_LIBRARY_PATH=\$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
+(cd /root/Mittens/server && ./target/release/scriptcad-server ../$LUA_FILE > /tmp/server.log 2>&1) &
 (cd /root/Mittens/renderer && npm run dev > /tmp/renderer.log 2>&1) &
 sleep 4
-echo "✓ Services restarted"
+echo "✓ Services restarted with $LUA_FILE"
 EOF
 fi
 
