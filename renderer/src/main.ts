@@ -26,7 +26,16 @@ controls.target.set(0, 0, 20); // Look at slightly above origin
 let current_mesh: THREE.Mesh | null = null;
 let arrows_group: THREE.Group | null = null;
 let field_plane: THREE.Mesh | null = null;
+let particles_group: THREE.Group | null = null;
 let flat_shading: boolean = true;
+
+// Animation/Time Stepping State (Stage 15)
+let particle_time: number = 0;
+let simulation_time: number = 0;        // Current simulation time (seconds)
+let last_frame_time: number | null = null; // Last frame timestamp for delta time
+let simulation_speed: number = 1.0;     // Playback speed multiplier (1.0 = realtime)
+let is_playing: boolean = true;         // Whether simulation is currently running
+let dt: number = 0.016;                 // Frame delta time (seconds)
 
 // Measurement markers (GaussMeter, Hydrophone)
 let measurement_markers: THREE.Group | null = null;
@@ -326,6 +335,35 @@ const PLANE_YZ = 2;
 const COLORMAP_JET = 0;
 const COLORMAP_VIRIDIS = 1;
 const COLORMAP_PLASMA = 2;
+const COLORMAP_PRESSURE_BLUE_RED = 3;
+
+// Pressure colormap: Blue (low pressure/nodes) -> Red (high pressure/antinodes)
+function value_to_color_pressure(t: number): THREE.Color {
+  t = Math.max(0, Math.min(1, t));
+  
+  // Blue to white to red gradient
+  // 0.0 = Blue (0, 0, 1)
+  // 0.5 = White (1, 1, 1)
+  // 1.0 = Red (1, 0, 0)
+  
+  let r: number, g: number, b: number;
+  
+  if (t < 0.5) {
+    // Blue to white: interpolate from (0,0,1) to (1,1,1)
+    const s = t * 2;  // 0 to 1
+    r = s;
+    g = s;
+    b = 1;
+  } else {
+    // White to red: interpolate from (1,1,1) to (1,0,0)
+    const s = (t - 0.5) * 2;  // 0 to 1
+    r = 1;
+    g = 1 - s;
+    b = 1 - s;
+  }
+  
+  return new THREE.Color(r, g, b);
+}
 
 function get_colormap_fn(colormap_id: number): ColormapFn {
   switch (colormap_id) {
@@ -333,6 +371,8 @@ function get_colormap_fn(colormap_id: number): ColormapFn {
       return value_to_color_viridis;
     case COLORMAP_PLASMA:
       return value_to_color_plasma;
+    case COLORMAP_PRESSURE_BLUE_RED:
+      return value_to_color_pressure;
     default:
       return value_to_color;
   }
@@ -527,6 +567,94 @@ function create_field_plane(slice: { width: number, height: number, bounds: numb
   }
 
   return plane;
+}
+
+// Create and update particle visualization
+function create_particles(): THREE.Group {
+  const group = new THREE.Group();
+  
+  // Create particle geometry and material
+  const particleCount = 20;
+  const geometry = new THREE.BufferGeometry();
+  const positions = new Float32Array(particleCount * 3);
+  const colors = new Float32Array(particleCount * 3);
+  
+  // Initialize particles along a simple path (main channel trunk)
+  // Particles will be distributed along the X-axis centerline
+  const trunk_start_x = -720; // mm (half of 1440mm length)
+  const trunk_end_x = 720;
+  const trunk_z = 247; // mm (approximate, at gel center height)
+  
+  for (let i = 0; i < particleCount; i++) {
+    const t = i / particleCount; // Parametric position along channel
+    positions[i * 3] = trunk_start_x + (trunk_end_x - trunk_start_x) * t;
+    positions[i * 3 + 1] = 0;
+    positions[i * 3 + 2] = trunk_z;
+    
+    // Color based on position (blue to red gradient)
+    colors[i * 3] = t; // Red component increases
+    colors[i * 3 + 1] = 0.5; // Green stays constant
+    colors[i * 3 + 2] = 1 - t; // Blue component decreases
+  }
+  
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  
+  const material = new THREE.PointsMaterial({
+    size: 3,
+    vertexColors: true,
+    sizeAttenuation: true,
+    opacity: 0.8,
+    transparent: true,
+  });
+  
+  const points = new THREE.Points(geometry, material);
+  group.add(points);
+  
+  return group;
+}
+
+// Update particle animation (Stage 15: time-synchronized)
+function update_particles() {
+  if (!particles_group) return;
+  
+  const points = particles_group.children[0];
+  if (!points || !(points instanceof THREE.Points)) return;
+  
+  const positionAttribute = points.geometry.getAttribute('position') as THREE.BufferAttribute;
+  const positions = positionAttribute.array as Float32Array;
+  
+  // Animate particles with oscillating motion synchronized to simulation_time
+  const particleCount = positions.length / 3;
+  const trunk_start_x = -720;
+  const trunk_end_x = 720;
+  const trunk_z = 247;
+  
+  // Oscillation frequency matched to acoustic frequency (0.02 Hz vasomotion)
+  const oscillation_freq = 0.02; // Hz
+  
+  for (let i = 0; i < particleCount; i++) {
+    // Base parametric position (spread particles along channel)
+    const base_t = i / particleCount;
+    
+    // Add oscillating motion to represent acoustic-driven flow
+    // Amplitude increases with simulation time to show flow response
+    const oscillation = Math.sin(2 * Math.PI * oscillation_freq * simulation_time + base_t * Math.PI * 2) * 0.15;
+    
+    // Primary motion: flow along channel
+    const t = (base_t + oscillation + simulation_time * 0.05) % 1.0;
+    
+    // Position along channel with flow-driven motion
+    positions[i * 3] = trunk_start_x + (trunk_end_x - trunk_start_x) * t;
+    positions[i * 3 + 1] = 0;
+    
+    // Vertical motion: acoustic field drives vertical oscillation (Z displacement)
+    // Matches the acoustic pressure field oscillation
+    const acoustic_pressure = Math.sin(2 * Math.PI * oscillation_freq * simulation_time) * 0.3;
+    positions[i * 3 + 2] = trunk_z + acoustic_pressure + Math.sin(simulation_time + i) * 2;
+  }
+  
+  positionAttribute.needsUpdate = true;
 }
 
 // Draw 1D graph
@@ -1264,6 +1392,14 @@ function update_mesh(buffer: ArrayBuffer) {
   const material = create_xray_material(flat_shading);
   current_mesh = new THREE.Mesh(result.geometry, material);
   scene.add(current_mesh);
+  
+  // Create particle visualization for flow
+  if (particles_group) {
+    scene.remove(particles_group);
+    particles_group = null;
+  }
+  particles_group = create_particles();
+  scene.add(particles_group);
 }
 
 // Status HUD (no GPU needed)
@@ -1303,7 +1439,12 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 
 // WebSocket
 function connect_websocket() {
-  const ws = new WebSocket(`ws://${window.location.host}/ws`);
+  // Try localhost:3001 for dev, fall back to /ws for production
+  let wsUrl = `ws://${window.location.host}/ws`;
+  if (window.location.port === '3000') {
+    wsUrl = 'ws://localhost:3001/ws';
+  }
+  const ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -1367,12 +1508,68 @@ function update_circuit_position() {
   circuit_overlay.style.transform = `scale(${scale})`;
 }
 
-// Render loop
+// Render loop (Stage 15: FPS-independent time stepping)
 function animate() {
   requestAnimationFrame(animate);
+  
+  // Calculate delta time for FPS-independent animation
+  const now = performance.now() / 1000; // Convert to seconds
+  if (last_frame_time === null) {
+    last_frame_time = now;
+  }
+  dt = Math.min(now - last_frame_time, 0.05); // Cap at 50ms to avoid jumps
+  last_frame_time = now;
+  
+  // Advance simulation time if playing
+  if (is_playing) {
+    simulation_time += dt * simulation_speed;
+  }
+  
+  // Update all time-dependent components
   controls.update();
   update_circuit_position();
+  update_particles(); // Particles use simulation_time internally
+  update_time_display(); // Update time display
+  
   renderer.render(scene, camera);
+}
+
+// Animation Control Panel Setup (Stage 15)
+const play_pause_btn = document.getElementById('play-pause-btn') as HTMLButtonElement;
+const reset_btn = document.getElementById('reset-btn') as HTMLButtonElement;
+const speed_input = document.getElementById('speed-input') as HTMLInputElement;
+const time_display = document.getElementById('time-display') as HTMLElement;
+
+play_pause_btn.addEventListener('click', () => {
+  is_playing = !is_playing;
+  play_pause_btn.classList.toggle('active', is_playing);
+  play_pause_btn.textContent = is_playing ? '⏸ PAUSE' : '▶ PLAY';
+});
+
+reset_btn.addEventListener('click', () => {
+  simulation_time = 0;
+  last_frame_time = null;
+  if (particles_group) {
+    // Reset particles to initial state by recreating them
+    scene.remove(particles_group);
+    particles_group = create_particles();
+    scene.add(particles_group);
+  }
+  console.log('Simulation reset to t=0');
+});
+
+speed_input.addEventListener('change', (e) => {
+  const val = parseFloat((e.target as HTMLInputElement).value);
+  if (!isNaN(val) && val > 0) {
+    simulation_speed = val;
+  } else {
+    speed_input.value = simulation_speed.toString();
+  }
+});
+
+// Update time display every frame
+function update_time_display() {
+  time_display.textContent = `t: ${simulation_time.toFixed(2)}s`;
 }
 
 // Start

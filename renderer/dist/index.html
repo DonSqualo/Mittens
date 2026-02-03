@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ScriptKitten</title>
+  <title>Mittens</title>
   <style>
     @font-face {
       font-family: 'Terminal';
@@ -155,7 +155,7 @@
       background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
     }
   </style>
-  <script type="module" crossorigin src="/assets/index-D2Dst4tf.js"></script>
+  <script type="module" crossorigin src="/assets/index-D49CCLbw.js"></script>
 </head>
 <body>
   <div class="noise"></div>
@@ -163,8 +163,9 @@
 
   <div id="main-view">
     <canvas id="main-canvas"></canvas>
-    <div class="tui-label">ScriptKitten</div>
-    <div class="tui-status" id="status">CONNECTING...</div>
+    <div class="tui-label">Mittens</div>
+    <div class="tui-status" id="status">⏳ CONNECTING...</div>
+    <div class="tui-status" id="status-detail" style="bottom: 20px; color: #555; font-size: 9px;"></div>
     <div id="circuit-overlay"></div>
   </div>
 
@@ -185,6 +186,16 @@
     </div>
     <div class="tui-content">
       <canvas id="nanovna-canvas" width="300" height="180"></canvas>
+    </div>
+  </div>
+
+  <div id="oscilloscope-window" class="tui-window" style="bottom: 420px; right: 20px; width: 320px;">
+    <div class="tui-titlebar">
+      <span>FDTD Oscilloscope</span>
+      <span class="tui-close" onclick="closeWindow('oscilloscope-window')">X</span>
+    </div>
+    <div class="tui-content">
+      <canvas id="oscilloscope-canvas" width="300" height="180"></canvas>
     </div>
   </div>
 

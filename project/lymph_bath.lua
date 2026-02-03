@@ -98,7 +98,7 @@ local bath_outer = box(
   Bath.depth + Bath.wall
 ):center(true, true, false)
 
-local bath_inner = box(Bath.length, Bath.width, Bath.depth + 1)
+local bath_inner = box(Bath.length, Bath.width, Bath.depth)
   :center(true, true, false)
   :at(0, 0, Bath.wall)
 
@@ -280,9 +280,218 @@ view({
 })
 
 -- ============================================================================
+-- Stage 11: Acoustic Field Visualization
+-- ============================================================================
+-- Generate standing wave acoustic field for visualization as XZ plane overlay
+
+local Acoustics = require("stdlib.acoustics")
+
+-- Create acoustic field using the default parameters from simulation config
+local acoustic_field = Acoustics.create_default_field(
+  Bath.length,
+  Simulation.frequency,
+  Simulation.amplitude
+)
+
+-- Register the field for the server to send to the renderer
+_G.AcousticField = {
+  _type = "acoustic_field",
+  time = acoustic_field.time,
+  frequency = acoustic_field.frequency,
+  amplitude = acoustic_field.amplitude,
+  wavelength = acoustic_field.wavelength,
+  max_pressure = acoustic_field.max_pressure,
+  grid_x_points = acoustic_field.grid_x_points,
+  grid_z_points = acoustic_field.grid_z_points,
+  x_min = acoustic_field.x_min,
+  x_max = acoustic_field.x_max,
+  z_min = acoustic_field.z_min,
+  z_max = acoustic_field.z_max,
+  -- Flatten the 2D pressure grid for transmission (1D array indexed by (x_idx-1)*grid_z + z_idx)
+  pressure_data = (function()
+    local flat = {}
+    for x_idx = 1, acoustic_field.grid_x_points do
+      for z_idx = 1, acoustic_field.grid_z_points do
+        table.insert(flat, acoustic_field.pressure[x_idx][z_idx])
+      end
+    end
+    return flat
+  end)(),
+}
+
+-- ============================================================================
+-- Stage 14: Flow Visualization with Particles
+-- ============================================================================
+-- Visualize flow through lymphatic channels using animated particles
+
+local Particles = require("stdlib.particles")
+
+-- Create channel network from geometry
+local network = Mittens.simulation.ChannelNetwork({})
+
+-- Add nodes for trunk and collectors
+local trunk_center_z = Bath.wall + Channels.trunk.z
+local trunk_x_start = -Channels.trunk.length / 2
+local trunk_x_end = Channels.trunk.length / 2
+
+-- Main trunk nodes
+local trunk_inlet_node = Mittens.simulation.ChannelNode("trunk_inlet", {
+  position = {trunk_x_start, 0, trunk_center_z},
+  node_type = "inlet",
+  flow_rate = 1e-8,  -- m^3/s (inlet)
+})
+network:add_node(trunk_inlet_node)
+
+local trunk_outlet_node = Mittens.simulation.ChannelNode("trunk_outlet", {
+  position = {trunk_x_end, 0, trunk_center_z},
+  node_type = "outlet",
+  pressure = 101325,  -- Pa
+})
+network:add_node(trunk_outlet_node)
+
+-- Add main trunk edge
+local trunk_length = math.sqrt(
+  (trunk_x_end - trunk_x_start)^2 + 0 + 0
+)
+local trunk_edge = Mittens.simulation.ChannelEdge("trunk", {
+  source_node = "trunk_inlet",
+  target_node = "trunk_outlet",
+  diameter = Channels.diameter,
+  length = trunk_length,
+  flow_rate = 1e-8,
+})
+network:add_edge(trunk_edge)
+
+-- Add collector nodes and edges
+local collector_start_x = trunk_x_start + Channels.collectors.spacing
+local collector_z_top = trunk_center_z + Channels.collectors.height / 2
+local collector_z_bot = trunk_center_z - Channels.collectors.height / 2
+
+for i = 1, Channels.collectors.count do
+  local x = collector_start_x + (i - 1) * Channels.collectors.spacing
+  
+  -- Collector inlet (at top)
+  local inlet_node = Mittens.simulation.ChannelNode("collector_" .. i .. "_inlet", {
+    position = {x, 0, collector_z_top},
+    node_type = "inlet",
+    flow_rate = 5e-9,
+  })
+  network:add_node(inlet_node)
+  
+  -- Collector junction (at trunk level)
+  local junction_node = Mittens.simulation.ChannelNode("collector_" .. i .. "_junction", {
+    position = {x, 0, trunk_center_z},
+    node_type = "junction",
+  })
+  network:add_node(junction_node)
+  
+  -- Vertical collector edge (downward)
+  local vertical_edge = Mittens.simulation.ChannelEdge("collector_" .. i, {
+    source_node = "collector_" .. i .. "_inlet",
+    target_node = "collector_" .. i .. "_junction",
+    diameter = Channels.collectors.diameter,
+    length = Channels.collectors.height,
+    flow_rate = 5e-9,
+  })
+  network:add_edge(vertical_edge)
+  
+  -- Connect to trunk
+  if i <= Channels.collectors.count / 2 then
+    -- Left side collectors
+    local to_trunk_edge = Mittens.simulation.ChannelEdge("collector_" .. i .. "_to_trunk", {
+      source_node = "collector_" .. i .. "_junction",
+      target_node = "trunk_outlet",
+      diameter = Channels.collectors.diameter * 0.8,
+      length = math.abs(trunk_x_end - x),
+      flow_rate = 5e-9,
+    })
+    network:add_edge(to_trunk_edge)
+  else
+    -- Right side collectors connect back to trunk
+    local to_trunk_edge = Mittens.simulation.ChannelEdge("collector_" .. i .. "_to_trunk", {
+      source_node = "collector_" .. i .. "_junction",
+      target_node = "trunk_outlet",
+      diameter = Channels.collectors.diameter * 0.8,
+      length = math.abs(trunk_x_end - x),
+      flow_rate = 5e-9,
+    })
+    network:add_edge(to_trunk_edge)
+  end
+end
+
+-- Create particle system
+local particle_system = Particles.create({
+  channel_network = network,
+  particles_per_inlet = 2,
+  max_particles = 50,
+  spawn_interval = 0.2,
+})
+
+-- Initialize particles
+particle_system:initialize()
+
+-- Register the particle system for animation updates
+_G.ParticleSystem = particle_system
+_G.ChannelNetwork = network
+
+-- Create initial flow visualization data export
+local function serialize_particles()
+  local particles_data = {}
+  local max_flow = particle_system.max_flow_magnitude
+  
+  for i, particle in ipairs(particle_system.particles) do
+    local color = particle:get_color(max_flow)
+    particles_data[i] = {
+      position = particle.position,
+      color = color,
+      flow_magnitude = particle.flow_magnitude,
+    }
+  end
+  
+  return particles_data
+end
+
+-- Export flow visualization data
+_G.FlowVisualization = {
+  _type = "flow_visualization",
+  particle_count = particle_system.particle_count,
+  max_flow_magnitude = particle_system.max_flow_magnitude,
+  particles = serialize_particles(),
+}
+
+-- ============================================================================
 -- Debug Output
 -- ============================================================================
 
+-- Debug: Count primitives in the scene
+local function count_primitives(obj, name)
+  if not obj then return 0 end
+  if obj._type == "group" or obj._type == "assembly" then
+    local count = 0
+    for _, child in ipairs(obj._children or {}) do
+      count = count + count_primitives(child, (obj._name or "?") .. "/")
+    end
+    print(string.format("  Group '%s': %d children -> %d primitives", obj._name or "?", #(obj._children or {}), count))
+    return count
+  elseif obj._type == "csg" then
+    local count = 0
+    for _, child in ipairs(obj._children or {}) do
+      count = count + count_primitives(child, name .. "/csg")
+    end
+    return count
+  elseif obj._type == "shape" then
+    print(string.format("  Primitive: %s (%s)", obj._tag or obj._name or "?", obj._metadata and obj._metadata.primitive or "?"))
+    return 1
+  else
+    return 1
+  end
+end
+
+print("\n=== Scene Structure ===")
+local total = count_primitives(assembly, "")
+print(string.format("Total primitives in assembly: %d", total))
+
+print("")
 print("=== Lymph Bath Configuration ===")
 print(string.format("Bath: %d x %d x %d mm", Bath.length, Bath.width, Bath.depth))
 print(string.format("Gel block: %d x %d x %d mm", Gel.length, Gel.width, Gel.height))
@@ -294,5 +503,16 @@ print(string.format("Frequency: %.3f Hz (period=%.1f s)", Simulation.frequency, 
 print(string.format("Amplitude: %.0f Pa", Simulation.amplitude))
 print(string.format("Phase sweep: %.2f Hz", Simulation.phase_sweep))
 print(string.format("Wavelength in water: %.1f mm", Simulation.medium_speed / Simulation.frequency * 1000))
+print("")
+print("=== Acoustic Field ===")
+print(string.format("Grid: %dx%d points", acoustic_field.grid_x_points, acoustic_field.grid_z_points))
+print(string.format("Max pressure: %.1f Pa", acoustic_field.max_pressure))
+print(string.format("Field registered for renderer: AcousticField"))
+print("")
+print("=== Flow Visualization (Particles) ===")
+print(string.format("Particle system created with %d nodes, %d edges", network:node_count(), network:edge_count()))
+print(string.format("Initial particles: %d", particle_system.particle_count))
+print(string.format("Max flow magnitude: %.2e m³/s", particle_system.max_flow_magnitude))
+print(string.format("Particle system registered for renderer: FlowVisualization"))
 
 return Mittens.serialize()

@@ -29,6 +29,7 @@ pub enum Colormap {
     Jet = 0,
     Viridis = 1,
     Plasma = 2,
+    PressureBlueRed = 3,  // For acoustic visualization: Blue (low) -> Red (high)
 }
 
 impl Colormap {

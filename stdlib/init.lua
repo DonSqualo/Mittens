@@ -15,6 +15,9 @@ Mittens.view = require("stdlib.view")
 Mittens.export = require("stdlib.export")
 Mittens.circuits = require("stdlib.circuits")
 Mittens.extrusions = require("stdlib.extrusions")
+Mittens.simulation = require("stdlib.simulation")
+Mittens.acoustics = require("stdlib.acoustics")
+Mittens.particles = require("stdlib.particles")
 
 -- Export primitive functions to global scope
 box = Mittens.primitives.box
@@ -83,6 +86,20 @@ tnut = Mittens.extrusions.tnut
 connector_plate = Mittens.extrusions.connector_plate
 extrusion_frame = Mittens.extrusions.frame
 mounting_holes = Mittens.extrusions.mounting_holes
+
+-- Export simulation functions
+timestep_config = Mittens.simulation.TimeStepConfig
+solver_config = Mittens.simulation.SolverConfig
+channel_network = Mittens.simulation.ChannelNetwork
+boundary_condition = Mittens.simulation.BoundaryCondition
+fluid_properties = Mittens.simulation.FluidProperties
+create_simulation = Mittens.simulation.create
+
+-- Export acoustics functions
+acoustic_source = Mittens.acoustics.AcousticSource
+standing_wave_field = Mittens.acoustics.StandingWaveField
+acoustic_simulation = Mittens.acoustics.AcousticSimulation
+pressure_to_color = Mittens.acoustics.PressureToColor
 
 -- Simulation config storage (stub - physics not implemented yet)
 Mittens._simulation_config = nil

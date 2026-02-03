@@ -101,6 +101,65 @@
       letter-spacing: 1px;
     }
 
+    #animation-controls {
+      position: absolute;
+      bottom: 8px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid #666;
+      padding: 8px 12px;
+      font-size: 11px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      z-index: 100;
+    }
+
+    .control-button {
+      background: #444;
+      border: 1px solid #666;
+      color: #ccc;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-family: 'Courier New', Consolas, monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .control-button:hover {
+      background: #666;
+      border-color: #888;
+    }
+
+    .control-button.active {
+      background: #0a8;
+      border-color: #0c8;
+    }
+
+    .speed-control {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .speed-input {
+      width: 40px;
+      background: #222;
+      border: 1px solid #666;
+      color: #aaa;
+      padding: 2px 4px;
+      font-family: 'Courier New', Consolas, monospace;
+      font-size: 10px;
+    }
+
+    .time-display {
+      color: #888;
+      font-size: 10px;
+      min-width: 60px;
+      text-align: right;
+    }
+
     #graph-window {
       bottom: 20px;
       right: 20px;
@@ -166,6 +225,18 @@
     <div class="tui-status" id="status">⏳ CONNECTING...</div>
     <div class="tui-status" id="status-detail" style="bottom: 20px; color: #555; font-size: 9px;"></div>
     <div id="circuit-overlay"></div>
+    
+    <!-- Animation Controls (Stage 15) -->
+    <div id="animation-controls">
+      <button id="play-pause-btn" class="control-button active" title="Play/Pause simulation">▶ PLAY</button>
+      <button id="reset-btn" class="control-button" title="Reset to t=0">⟲ RESET</button>
+      <div class="speed-control">
+        <label for="speed-input" style="font-size: 10px;">SPD:</label>
+        <input id="speed-input" class="speed-input" type="number" value="1.0" min="0.1" max="5" step="0.1" title="Simulation speed multiplier">
+        <span style="color: #666;">x</span>
+      </div>
+      <div class="time-display" id="time-display">t: 0.0s</div>
+    </div>
   </div>
 
   <div id="graph-window" class="tui-window">

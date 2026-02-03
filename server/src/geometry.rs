@@ -500,6 +500,10 @@ fn build_mesh_recursive_with_components(
     components: &HashMap<String, mlua::Table>,
 ) -> Result<MeshData> {
     let obj_type: String = table.get("type")?;
+    let obj_name: String = table.get("name").unwrap_or_default();
+    let obj_tag: String = table.get("tag").unwrap_or_default();
+    
+    tracing::info!("Processing object: type={}, name={}, tag={}", obj_type, obj_name, obj_tag);
 
     if obj_type == "group" || obj_type == "assembly" || obj_type == "component" {
         // Groups, assemblies, and components all union their children
@@ -509,6 +513,9 @@ fn build_mesh_recursive_with_components(
         for pair in children.pairs::<i64, mlua::Table>() {
             let (_, child) = pair?;
             let child_mesh = build_mesh_recursive_with_components(&child, circular_segments, components)?;
+            tracing::info!("  Child mesh: {} vertices, {} triangles", 
+                child_mesh.positions.len() / 3, 
+                child_mesh.indices.len() / 3);
             child_meshes.push(child_mesh);
         }
 
@@ -517,6 +524,9 @@ fn build_mesh_recursive_with_components(
         } else {
             combine_meshes(child_meshes)
         };
+        
+        tracing::info!("Combined group '{}': {} vertices, {} triangles", 
+            obj_name, combined.positions.len() / 3, combined.indices.len() / 3);
 
         // Apply group-level material if present (overrides children)
         if let Some((r, g, b)) = get_material_color(table) {
