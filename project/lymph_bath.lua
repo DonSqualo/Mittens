@@ -11,23 +11,23 @@ local Mittens = require("stdlib")
 
 
 Bath = {
-  length = 2000,    -- mm (X)
-  width = 600,      -- mm (Y) — not rendered in 2D
-  depth = 400,      -- mm (Z)
-  wall = 5,         -- mm (aluminum wall thickness)
+  length = 2000,
+  width = 600,
+  depth = 400,
+  wall = 5,
 }
 
 Gel = {
-  length = 1600,    -- mm
-  width = 400,      -- mm
-  height = 300,     -- mm
-  offset_z = 50,    -- mm from bath bottom
+  length = 1600,
+  width = 400,
+  height = 300,
+  offset_z = 50,
 }
 
 -- Simplified channel network (2D, in XZ plane)
 Channels = {
-  diameter = 3,     -- mm (main trunk)
-  wall = 0.5,       -- mm
+  diameter = 3,
+  wall = 0.5,
   
   -- Main horizontal trunk
   trunk = {
