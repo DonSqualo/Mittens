@@ -1300,9 +1300,9 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
             let cam = if let Ok(cam_table) = view.get::<_, mlua::Table>("camera") {
                 let pos: Option<mlua::Table> = cam_table.get("position").ok();
                 let tgt: Option<mlua::Table> = cam_table.get("target").ok();
-                let fov: Option<f32> = cam_table.get("fov").ok();
+                let fov: f32 = cam_table.get("fov").unwrap_or(45.0); // Default FOV
 
-                if let (Some(pos_t), Some(tgt_t), Some(fov_v)) = (pos, tgt, fov) {
+                if let (Some(pos_t), Some(tgt_t)) = (pos, tgt) {
                     let position = [
                         pos_t.get::<_, f32>(1).unwrap_or(100.0),
                         pos_t.get::<_, f32>(2).unwrap_or(100.0),
@@ -1313,7 +1313,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                         tgt_t.get::<_, f32>(2).unwrap_or(0.0),
                         tgt_t.get::<_, f32>(3).unwrap_or(0.0),
                     ];
-                    Some(CameraState { position, target, fov: fov_v })
+                    Some(CameraState { position, target, fov })
                 } else {
                     None
                 }
