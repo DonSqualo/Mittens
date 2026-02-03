@@ -94,6 +94,10 @@ local function make_csg_metatable()
       self._name = n
       return self
     end,
+    tag = function(self, t)
+      self._tag = t
+      return self
+    end,
     eval = function(self, x, y, z)
       return self._sdf(x, y, z)
     end,
@@ -109,7 +113,8 @@ local function make_csg_metatable()
         ops = self._ops,
         material = self._material,
         color = self._color,
-        name = self._name
+        name = self._name,
+        tag = self._tag
       }
     end
   }}

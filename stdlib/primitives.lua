@@ -47,6 +47,11 @@ local function Shape(sdf_func, bounds, metadata)
       return self
     end,
 
+    tag = function(self, t)
+      self._tag = t
+      return self
+    end,
+
     center = function(self, cx, cy, cz)
       local bounds = self._bounds
       local dx = cx and -((bounds.min[1] + bounds.max[1]) / 2) or 0
@@ -75,7 +80,8 @@ local function Shape(sdf_func, bounds, metadata)
         ops = self._ops,
         material = self._material,
         color = self._color,
-        name = self._name
+        name = self._name,
+        tag = self._tag
       }
     end
   }})

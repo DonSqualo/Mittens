@@ -75,6 +75,19 @@ MatchingNetwork = Mittens.circuits.MatchingNetwork
 TransducerLoad = Mittens.circuits.TransducerLoad
 Circuit = Mittens.circuits.Circuit
 
+-- Simulation config storage (stub - physics not implemented yet)
+Mittens._simulation_config = nil
+
+--- Register a simulation configuration (stub)
+-- Captures config for future physics layer implementation
+-- @param config Simulation configuration table
+function simulation(config)
+  Mittens._simulation_config = config
+  if config then
+    print("[simulation] Config captured (physics layer not yet implemented)")
+    print(string.format("  Type: %s", config.type or "unknown"))
+  end
+end
 
 -- Scene registry
 Mittens._scene = {
