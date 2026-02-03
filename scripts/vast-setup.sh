@@ -18,12 +18,16 @@ apt-get install -y \
     curl \
     pkg-config \
     libssl-dev \
-    nodejs \
-    npm \
     python3 \
     python3-pip \
     ffmpeg \
     xvfb
+
+# Install Node.js if not present (nodejs 20+ includes npm)
+if ! command -v node &> /dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+fi
 
 # Install Rust
 if ! command -v rustc &> /dev/null; then
