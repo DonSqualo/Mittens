@@ -107,12 +107,12 @@ local bath_shell = difference(bath_outer, bath_inner)
   :color(0.7, 0.7, 0.75, 1.0)
   :tag("bath_shell")
 
--- Water volume (for visualization)
+-- Water volume (for visualization) - very transparent to see inside
 local water_volume = box(Bath.length, Bath.width, Bath.depth)
   :center(true, true, false)
   :at(0, 0, Bath.wall)
   :material(water)
-  :color(0.2, 0.4, 0.8, 0.3)
+  :color(0.2, 0.4, 0.8, 0.1)
   :tag("bath_water")
 
 -- ============================================================================
@@ -123,7 +123,7 @@ local gel_block = box(Gel.length, Gel.width, Gel.height)
   :center(true, true, false)
   :at(0, 0, Bath.wall + Gel.offset_z)
   :material(gel)
-  :color(0.9, 0.7, 0.7, 0.6)
+  :color(1.0, 0.5, 0.5, 0.8)
   :tag("gel_matrix")
 
 -- ============================================================================
@@ -142,7 +142,7 @@ local trunk = cylinder(Channels.diameter / 2, Channels.trunk.length)
   :rotate(0, 90, 0)
   :at(0, 0, trunk_z)
   :material(lymph)
-  :color(0.3, 0.8, 0.3, 0.8)
+  :color(0.2, 1.0, 0.2, 1.0)
   :tag("channel_trunk")
 
 table.insert(channel_group, trunk)
@@ -155,7 +155,7 @@ for i = 1, Channels.collectors.count do
     :centered()
     :at(x, 0, trunk_z + Channels.collectors.height / 2)
     :material(lymph)
-    :color(0.3, 0.8, 0.3, 0.8)
+    :color(0.2, 1.0, 0.2, 1.0)
     :tag("channel_collector_" .. i)
   table.insert(channel_group, collector)
 end
