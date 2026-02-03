@@ -19,13 +19,12 @@ local tube = cylinder(5, 100)
 local assembly = group("lymph_system", { tube })
 Mittens.register(assembly)
 
-return {
-  assembly,
-  view = {
-    camera = {
-      position = {-2554, -2061, 1395},
-      target = {0, 0, 20},
-      up = {0, 0, 1}
-    }
+-- Set camera view
+Mittens.view.view({
+  camera = {
+    position = {-2554, -2061, 1395},
+    target = {0, 0, 20}
   }
-}
+})
+
+return Mittens.serialize()

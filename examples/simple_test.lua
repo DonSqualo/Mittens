@@ -2,15 +2,15 @@
 local Mittens = require("stdlib")
 
 -- Just a simple box
-local box = box(50, 50, 50)
+local b = box(50, 50, 50)
+Mittens.register(b)
 
-return {
-  box,
-  view = {
-    camera = {
-      position = {-200, -200, 100},
-      target = {0, 0, 0},
-      up = {0, 0, 1}
-    }
+-- Set camera view
+Mittens.view.view({
+  camera = {
+    position = {-200, -200, 100},
+    target = {0, 0, 0}
   }
-}
+})
+
+return Mittens.serialize()
