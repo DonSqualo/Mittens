@@ -12,7 +12,7 @@ renderer.setClearColor(0x000000, 1);
 const scene = new THREE.Scene();
 
 // Camera (Z-up coordinate system)
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 50000);
 camera.up.set(0, 0, 1); // Z is up
 camera.position.set(-80, -150, 80); // View from front-left, slightly above
 
