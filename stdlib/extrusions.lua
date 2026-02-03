@@ -123,39 +123,43 @@ function Extrusions.structural_frame(length, width, height, profile_type)
     error("Unknown profile for frame: " .. tostring(profile_type))
   end
   
+  local pw = spec.outer_width   -- profile width
+  local pd = spec.outer_depth   -- profile depth
+  
   local parts = {}
   
-  -- Four vertical corner legs
+  -- Four vertical corner legs (centered on frame corners)
+  -- Legs placed so their centers align with frame corner positions
   table.insert(parts, Extrusions.profile(profile_type, height)
-    :at(-length/2, -width/2, 0))
+    :at(-length/2 - pw/2, -width/2 - pd/2, 0))
   table.insert(parts, Extrusions.profile(profile_type, height)
-    :at(length/2, -width/2, 0))
+    :at(length/2 - pw/2, -width/2 - pd/2, 0))
   table.insert(parts, Extrusions.profile(profile_type, height)
-    :at(-length/2, width/2, 0))
+    :at(-length/2 - pw/2, width/2 - pd/2, 0))
   table.insert(parts, Extrusions.profile(profile_type, height)
-    :at(length/2, width/2, 0))
+    :at(length/2 - pw/2, width/2 - pd/2, 0))
   
   -- Horizontal beams at mid-height connecting legs
   table.insert(parts, Extrusions.profile(profile_type, length)
     :rotate(0, 90, 0)
-    :at(0, -width/2, height / 2))
+    :at(-length/2, -width/2 - pd/2, height / 2))
   table.insert(parts, Extrusions.profile(profile_type, length)
     :rotate(0, 90, 0)
-    :at(0, width/2, height / 2))
+    :at(-length/2, width/2 - pd/2, height / 2))
   table.insert(parts, Extrusions.profile(profile_type, width)
     :rotate(90, 0, 0)
-    :at(-length/2, 0, height / 2))
+    :at(-length/2 - pw/2, -width/2, height / 2))
   table.insert(parts, Extrusions.profile(profile_type, width)
     :rotate(90, 0, 0)
-    :at(length/2, 0, height / 2))
+    :at(length/2 - pw/2, -width/2, height / 2))
   
   -- Lower reinforcing beams at 1/4 height for water load support
   table.insert(parts, Extrusions.profile(profile_type, length)
     :rotate(0, 90, 0)
-    :at(0, -width/2 + 50, height / 4))
+    :at(-length/2, -width/2 + 50, height / 4))
   table.insert(parts, Extrusions.profile(profile_type, length)
     :rotate(0, 90, 0)
-    :at(0, width/2 - 50, height / 4))
+    :at(-length/2, width/2 - 50, height / 4))
   
   local frame = group("structural_frame", parts)
   return frame
