@@ -82,6 +82,7 @@ Circuit = Mittens.circuits.Circuit
 -- Export extrusion functions
 extrusion = Mittens.extrusions.profile
 corner_bracket = Mittens.extrusions.corner_bracket
+structural_frame = Mittens.extrusions.structural_frame
 
 -- Export simulation functions
 timestep_config = Mittens.simulation.TimeStepConfig

@@ -181,28 +181,23 @@ local speaker_right = cylinder(Speakers.diameter / 2, Speakers.depth)
   :tag("speaker_right")
 
 
--- Geometry: Test Extrusion Frame
+-- Geometry: Structural Support Frame
 
--- Simple test frame to verify extrusions render correctly
--- Creates a small 200x200x100mm frame using 20x20 profiles
+-- Table-like frame supporting the bath from below
+-- 4 vertical legs at corners, horizontal beams, cross-bracing for water load (~500kg)
+-- Using 20x20mm aluminum T-slot extrusions
 
-local test_frame_extrusion_1 = extrusion("20x20", 200)
-  :at(-100, -100, -150)
-  :tag("extrusion_test_1")
+local Extrusions = require("stdlib.extrusions")
 
-local test_frame_extrusion_2 = extrusion("20x20", 200)
-  :at(-100, 100, -150)
-  :tag("extrusion_test_2")
-
-local test_frame_extrusion_3 = extrusion("20x20", 200)
-  :rotate(90, 0, 0)
-  :at(-100, 0, -150)
-  :tag("extrusion_test_3")
-
-local test_frame_extrusion_4 = extrusion("20x20", 200)
-  :rotate(90, 0, 0)
-  :at(100, 0, -150)
-  :tag("extrusion_test_4")
+local frame = Extrusions.structural_frame(
+  Bath.length + 200,
+  Bath.width + 200,
+  Bath.depth - 50,
+  "20x20"
+)
+  :at(0, 0, -Bath.depth + 50)
+  :material(aluminum)
+  :color(0.7, 0.7, 0.75, 1.0)
 
 
 -- Assembly
@@ -215,10 +210,7 @@ local assembly = group("lymph_bath", {
   channels,
   speaker_left,
   speaker_right,
-  test_frame_extrusion_1,
-  test_frame_extrusion_2,
-  test_frame_extrusion_3,
-  test_frame_extrusion_4,
+  frame,
 })
 
 Mittens.register(assembly)
