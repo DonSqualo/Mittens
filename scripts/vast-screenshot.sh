@@ -50,9 +50,10 @@ sleep 1
 export LD_LIBRARY_PATH=$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
 cd /root/Mittens && git pull
 
-# Server runs from ./server with relative path to project
-cd server && LD_LIBRARY_PATH=$(find ../server -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname) ./target/release/scriptcad-server ../project/lymph_bath.lua > /tmp/server.log 2>&1 &
-cd ../renderer && npm run dev > /tmp/renderer.log 2>&1 &
+# Server runs from ./server dir with relative path to project  
+export LD_LIBRARY_PATH=$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
+(cd /root/Mittens/server && ./target/release/scriptcad-server ../project/lymph_bath.lua > /tmp/server.log 2>&1) &
+(cd /root/Mittens/renderer && npm run dev > /tmp/renderer.log 2>&1) &
 sleep 4
 echo "✓ Services restarted"
 EOF
