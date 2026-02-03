@@ -181,6 +181,30 @@ local speaker_right = cylinder(Speakers.diameter / 2, Speakers.depth)
   :tag("speaker_right")
 
 -- ============================================================================
+-- Geometry: Test Extrusion Frame
+-- ============================================================================
+-- Simple test frame to verify extrusions render correctly
+-- Creates a small 200x200x100mm frame using 20x20 profiles
+
+local test_frame_extrusion_1 = extrusion("20x20", 200)
+  :at(-100, -100, -150)
+  :tag("extrusion_test_1")
+
+local test_frame_extrusion_2 = extrusion("20x20", 200)
+  :at(-100, 100, -150)
+  :tag("extrusion_test_2")
+
+local test_frame_extrusion_3 = extrusion("20x20", 200)
+  :rotate(90, 0, 0)
+  :at(-100, 0, -150)
+  :tag("extrusion_test_3")
+
+local test_frame_extrusion_4 = extrusion("20x20", 200)
+  :rotate(90, 0, 0)
+  :at(100, 0, -150)
+  :tag("extrusion_test_4")
+
+-- ============================================================================
 -- Assembly
 -- ============================================================================
 
@@ -191,6 +215,10 @@ local assembly = group("lymph_bath", {
   channels,
   speaker_left,
   speaker_right,
+  test_frame_extrusion_1,
+  test_frame_extrusion_2,
+  test_frame_extrusion_3,
+  test_frame_extrusion_4,
 })
 
 Mittens.register(assembly)

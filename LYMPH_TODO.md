@@ -11,8 +11,8 @@
 
 | # | Task | Status | Agent | Time |
 |---|------|--------|-------|------|
-| 1 | Fix renderer (verify geometry visible) | pending | - | - |
-| 2 | Add aluminum extrusion profiles to stdlib | pending | - | - |
+| 1 | Fix renderer (verify geometry visible) | ✅ complete | subagent-44280283 | 2026-02-03 01:45 UTC |
+| 2 | Add aluminum extrusion profiles to stdlib | ✅ complete | subagent-ccdc9af6 | 2026-02-03 02:02 UTC |
 | 3 | Build bath frame with 80/20 extrusions | pending | - | - |
 | 4 | **CLEANUP #1** - remove dead code, organize | pending | - | - |
 | 5 | Add cooling system manifold geometry | pending | - | - |

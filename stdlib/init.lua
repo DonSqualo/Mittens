@@ -14,6 +14,7 @@ Mittens.physics = require("stdlib.physics")
 Mittens.view = require("stdlib.view")
 Mittens.export = require("stdlib.export")
 Mittens.circuits = require("stdlib.circuits")
+Mittens.extrusions = require("stdlib.extrusions")
 
 -- Export primitive functions to global scope
 box = Mittens.primitives.box
@@ -74,6 +75,14 @@ Amplifier = Mittens.circuits.Amplifier
 MatchingNetwork = Mittens.circuits.MatchingNetwork
 TransducerLoad = Mittens.circuits.TransducerLoad
 Circuit = Mittens.circuits.Circuit
+
+-- Export extrusion functions
+extrusion = Mittens.extrusions.profile
+corner_bracket = Mittens.extrusions.corner_bracket
+tnut = Mittens.extrusions.tnut
+connector_plate = Mittens.extrusions.connector_plate
+extrusion_frame = Mittens.extrusions.frame
+mounting_holes = Mittens.extrusions.mounting_holes
 
 -- Simulation config storage (stub - physics not implemented yet)
 Mittens._simulation_config = nil
