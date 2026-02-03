@@ -50,7 +50,7 @@ sleep 1
 export LD_LIBRARY_PATH=$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
 cd /root/Mittens && git pull
 
-PROJECT_FILE=$(grep -oP "args: '\K[^']+" ecosystem.config.js 2>/dev/null || echo "project/lymph_bath.lua")
+PROJECT_FILE=$(grep -oP "args: '\K[^']+" ecosystem.config.js 2>/dev/null | head -1 || echo "project/lymph_bath.lua")
 ./server/target/release/scriptcad-server $PROJECT_FILE > /tmp/server.log 2>&1 &
 cd renderer && npm run dev > /tmp/renderer.log 2>&1 &
 sleep 4
