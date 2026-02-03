@@ -6,9 +6,9 @@
 
 local Mittens = require("stdlib")
 
--- ============================================================================
+
 -- Configuration
--- ============================================================================
+
 
 Bath = {
   length = 2000,    -- mm (X)
@@ -59,9 +59,9 @@ Simulation = {
   medium_speed = 1524,    -- m/s (water at 37°C)
 }
 
--- ============================================================================
+
 -- Materials
--- ============================================================================
+
 
 local aluminum = material("aluminum", {
   density = 2700,
@@ -88,9 +88,9 @@ local lymph = material("lymph", {
   viscosity = 0.0018,
 })
 
--- ============================================================================
+
 -- Geometry: Bath (outer shell)
--- ============================================================================
+
 
 local bath_outer = box(
   Bath.length + 2 * Bath.wall,
@@ -115,9 +115,9 @@ local water_volume = box(Bath.length, Bath.width, Bath.depth)
   :color(0.2, 0.4, 0.8, 0.1)
   :tag("bath_water")
 
--- ============================================================================
+
 -- Geometry: Gel Block (tissue surrogate)
--- ============================================================================
+
 
 local gel_block = box(Gel.length, Gel.width, Gel.height)
   :center(true, true, false)
@@ -126,9 +126,9 @@ local gel_block = box(Gel.length, Gel.width, Gel.height)
   :color(1.0, 0.5, 0.5, 0.8)
   :tag("gel_matrix")
 
--- ============================================================================
+
 -- Geometry: Channel Network (simplified lymphatic)
--- ============================================================================
+
 
 local channel_group = {}
 
@@ -162,9 +162,9 @@ end
 
 local channels = group("lymphatic_network", channel_group)
 
--- ============================================================================
+
 -- Geometry: Speakers (acoustic sources)
--- ============================================================================
+
 
 local speaker_left = cylinder(Speakers.diameter / 2, Speakers.depth)
   :centered()
@@ -180,9 +180,9 @@ local speaker_right = cylinder(Speakers.diameter / 2, Speakers.depth)
   :color(0.2, 0.2, 0.2, 1.0)
   :tag("speaker_right")
 
--- ============================================================================
+
 -- Geometry: Test Extrusion Frame
--- ============================================================================
+
 -- Simple test frame to verify extrusions render correctly
 -- Creates a small 200x200x100mm frame using 20x20 profiles
 
@@ -204,9 +204,9 @@ local test_frame_extrusion_4 = extrusion("20x20", 200)
   :at(100, 0, -150)
   :tag("extrusion_test_4")
 
--- ============================================================================
+
 -- Assembly
--- ============================================================================
+
 
 local assembly = group("lymph_bath", {
   bath_shell,
@@ -223,9 +223,9 @@ local assembly = group("lymph_bath", {
 
 Mittens.register(assembly)
 
--- ============================================================================
+
 -- Simulation Setup (consumed by physics layer)
--- ============================================================================
+
 
 simulation({
   type = "acoustic_fluid",
@@ -263,9 +263,9 @@ simulation({
   },
 })
 
--- ============================================================================
+
 -- View Configuration
--- ============================================================================
+
 
 view({
   flat_shading = true,
@@ -279,9 +279,9 @@ view({
   fov = 30,
 })
 
--- ============================================================================
+
 -- Stage 11: Acoustic Field Visualization
--- ============================================================================
+
 -- Generate standing wave acoustic field for visualization as XZ plane overlay
 
 local Acoustics = require("stdlib.acoustics")
@@ -319,9 +319,9 @@ _G.AcousticField = {
   end)(),
 }
 
--- ============================================================================
+
 -- Stage 14: Flow Visualization with Particles
--- ============================================================================
+
 -- Visualize flow through lymphatic channels using animated particles
 
 local Particles = require("stdlib.particles")
@@ -459,9 +459,9 @@ _G.FlowVisualization = {
   particles = serialize_particles(),
 }
 
--- ============================================================================
+
 -- Debug Output
--- ============================================================================
+
 
 -- Debug: Count primitives in the scene
 local function count_primitives(obj, name)
