@@ -12,9 +12,14 @@ return {
   },
 
   visible = {
-    "bridge_gap_resonator",
-    "resonator",
-    "coil_assembly",
+    "lymph_bath",
+    "bath_shell",
+    "bath_water",
+    "gel_matrix",
+    "lymphatic_network",
+    "channel_trunk",
+    "speaker_left",
+    "speaker_right",
     -- "debug_objects",  -- Commented items are hidden
   },
 

@@ -242,13 +242,13 @@ simulation({
 view({
   flat_shading = true,
   camera = {
-    position = { 0, -2000, Bath.depth / 2 + Bath.wall },
-    target = { 0, 0, Bath.depth / 2 + Bath.wall },
+    position = { 0, -5000, 500 },
+    target = { 0, 0, 200 },
     up = { 0, 0, 1 },
   },
-  -- XZ plane display
-  projection = "orthographic",
-  plane = "XZ",
+  -- XZ plane display (looking from Y toward XZ plane)
+  projection = "perspective",
+  fov = 30,
 })
 
 -- ============================================================================
