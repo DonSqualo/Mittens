@@ -1,23 +1,27 @@
 #!/bin/bash
 # Take a screenshot from Vast.ai GPU instance
-# Usage: ./vast-screenshot.sh [--restart] [--lua FILE] [output.png]
+# Usage: ./vast-screenshot.sh [--restart] [--rebuild] [--lua FILE] [output.png]
 #
 # Options:
-#   --restart      Kill and restart server/renderer (for TS/Rust changes)
+#   --restart      Kill and restart server/renderer
+#   --rebuild      Also rebuild Rust server (for Rust code changes)
 #   --lua FILE     Lua file to load (relative to Mittens/, e.g. examples/my_script.lua)
 #                  Default: project/lymph_bath.lua
 #
 # Note: Lua changes require --restart to take effect (server loads file at startup)
+#       Rust changes require --rebuild to recompile the server
 
 set -e
 
 RESTART=false
+REBUILD=false
 LUA_FILE="project/lymph_bath.lua"
 OUTPUT="screenshot_$(date +%H%M%S).png"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --restart) RESTART=true; shift ;;
+    --rebuild) REBUILD=true; RESTART=true; shift ;;
     --lua) LUA_FILE="$2"; shift 2 ;;
     *) OUTPUT="$1"; shift ;;
   esac
@@ -47,6 +51,19 @@ echo "📡 Found instance $INSTANCE_ID at $SSH_HOST:$SSH_PORT"
 
 if [ "$RESTART" = true ]; then
   echo "🔄 Restarting services with Lua file: $LUA_FILE"
+  
+  if [ "$REBUILD" = true ]; then
+    echo "🔨 Rebuilding Rust server..."
+    $SSH_CMD "bash -s" << 'REBUILD_EOF'
+pkill -f scriptcad-server 2>/dev/null || true
+pkill -f vite 2>/dev/null || true
+cd /root/Mittens && git pull
+export LD_LIBRARY_PATH=$(find /root/Mittens -name "libmanifoldc.so" -path "*/out/lib/*" 2>/dev/null | head -1 | xargs dirname)
+cd /root/Mittens/server && cargo build --release 2>&1 | tail -5
+echo "✓ Rebuild complete"
+REBUILD_EOF
+  fi
+  
   $SSH_CMD "bash -s" << EOF
 pkill -f scriptcad-server 2>/dev/null || true
 pkill -f vite 2>/dev/null || true
