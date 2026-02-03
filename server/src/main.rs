@@ -34,6 +34,7 @@ mod voxel;
 
 struct AppState {
     mesh_tx: broadcast::Sender<Vec<u8>>,
+    current_view: RwLock<Option<Vec<u8>>>,
     current_mesh: RwLock<Option<Vec<u8>>>,
     current_field: RwLock<Option<Vec<u8>>>,
     current_circuit: RwLock<Option<Vec<u8>>>,
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         mesh_tx: mesh_tx.clone(),
+        current_view: RwLock::new(None),
         current_mesh: RwLock::new(None),
         current_field: RwLock::new(None),
         current_circuit: RwLock::new(None),
@@ -76,6 +78,7 @@ async fn main() -> Result<()> {
     let state_clone = state.clone();
     tokio::spawn(async move {
         while let Some(data) = result_rx.recv().await {
+            let is_view = data.len() >= 8 && &data[0..4] == b"VIEW";
             let is_field = data.len() >= 5 && &data[0..5] == b"FIELD";
             let is_circuit = data.len() >= 8 && &data[0..8] == b"CIRCUIT\0";
             let is_nanovna = data.len() >= 8 && &data[0..8] == b"NANOVNA\0";
@@ -83,7 +86,9 @@ async fn main() -> Result<()> {
             let is_meep = (data.len() >= 5 && &data[0..5] == b"MEEP\0") ||
                           (data.len() >= 6 && &data[0..6] == b"MEEPV\0");
 
-            if is_field {
+            if is_view {
+                *state_clone.current_view.write().await = Some(data.clone());
+            } else if is_field {
                 *state_clone.current_field.write().await = Some(data.clone());
             } else if is_circuit {
                 *state_clone.current_circuit.write().await = Some(data.clone());
@@ -1294,13 +1299,16 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
     // Extract view config
     let (flat_shading, circular_segments, camera) = if let Some(table) = result.as_table() {
         if let Ok(view) = table.get::<_, mlua::Table>("view") {
+            eprintln!("DEBUG: Found view table in result");
             let flat = view.get::<_, bool>("flat_shading").unwrap_or(false);
             let segments = view.get::<_, u32>("circular_segments").unwrap_or(32);
 
             let cam = if let Ok(cam_table) = view.get::<_, mlua::Table>("camera") {
+                eprintln!("DEBUG: Found camera table in view");
                 let pos: Option<mlua::Table> = cam_table.get("position").ok();
                 let tgt: Option<mlua::Table> = cam_table.get("target").ok();
-                let fov: f32 = cam_table.get("fov").unwrap_or(45.0); // Default FOV
+                let fov: f32 = cam_table.get("fov").unwrap_or(45.0);
+                eprintln!("DEBUG: pos={:?}, tgt={:?}, fov={}", pos.is_some(), tgt.is_some(), fov);
 
                 if let (Some(pos_t), Some(tgt_t)) = (pos, tgt) {
                     let position = [
@@ -1313,19 +1321,24 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                         tgt_t.get::<_, f32>(2).unwrap_or(0.0),
                         tgt_t.get::<_, f32>(3).unwrap_or(0.0),
                     ];
+                    eprintln!("DEBUG: Camera extracted: pos={:?}, tgt={:?}, fov={}", position, target, fov);
                     Some(CameraState { position, target, fov })
                 } else {
+                    eprintln!("DEBUG: pos or tgt is None");
                     None
                 }
             } else {
+                eprintln!("DEBUG: No camera table in view");
                 None
             };
 
             (flat, segments, cam)
         } else {
+            eprintln!("DEBUG: No view table in result");
             (false, 32, None)
         }
     } else {
+        eprintln!("DEBUG: result is not a table");
         (false, 32, None)
     };
 
@@ -1415,6 +1428,11 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.mesh_tx.subscribe();
+
+    // Send current view config if available (must come BEFORE mesh)
+    if let Some(view) = state.current_view.read().await.clone() {
+        let _ = sender.send(Message::Binary(view.into())).await;
+    }
 
     // Send current mesh if available
     if let Some(mesh) = state.current_mesh.read().await.clone() {

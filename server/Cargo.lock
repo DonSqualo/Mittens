@@ -1404,6 +1404,7 @@ dependencies = [
  "flate2",
  "futures",
  "manifold3d",
+ "manifold3d-sys",
  "mlua",
  "notify",
  "notify-debouncer-mini",

@@ -4,10 +4,43 @@
 use anyhow::{anyhow, Result};
 use manifold3d::types::{Matrix4x3, PositiveF64, PositiveI32, Vec3};
 use manifold3d::{Manifold, MeshGL};
+use manifold3d_sys::{ManifoldVec2, ManifoldSimplePolygon, ManifoldPolygons, ManifoldManifold};
 use mlua::{Lua, Value};
 use std::alloc::{alloc, Layout};
 use std::collections::HashMap;
 use std::os::raw::c_void;
+
+// Additional FFI functions for polygon extrusion
+// These work around a bug in manifold3d 0.0.6 where SimplePolygon objects
+// are prematurely freed in Polygons::from_simple_polygons
+extern "C" {
+    fn manifold_simple_polygon(
+        mem: *mut c_void,
+        ps: *mut ManifoldVec2,
+        length: usize,
+    ) -> *mut ManifoldSimplePolygon;
+    
+    fn manifold_polygons(
+        mem: *mut c_void,
+        ps: *mut *mut ManifoldSimplePolygon,
+        length: usize,
+    ) -> *mut ManifoldPolygons;
+    
+    fn manifold_extrude(
+        mem: *mut c_void,
+        cs: *mut ManifoldPolygons,
+        height: f64,
+        slices: i32,
+        twist_degrees: f64,
+        scale_x: f64,
+        scale_y: f64,
+    ) -> *mut ManifoldManifold;
+    
+    fn manifold_delete_simple_polygon(p: *mut ManifoldSimplePolygon);
+    fn manifold_delete_polygons(p: *mut ManifoldPolygons);
+    fn manifold_alloc_simple_polygon() -> *mut ManifoldSimplePolygon;
+    fn manifold_alloc_polygons() -> *mut ManifoldPolygons;
+}
 
 /// Mesh data for WebSocket transfer
 #[derive(Clone)]
@@ -302,6 +335,97 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             );
 
             Ok(outer.difference(&inner))
+        }
+        "linear_extrude" => {
+            // Extrude a 2D polygon along Z axis
+            // Uses direct FFI calls to work around bug in manifold3d 0.0.6
+            // where SimplePolygon objects are prematurely freed
+            let height: f64 = params.get("height").unwrap_or(10.0);
+            
+            // Collect all polygon point vectors
+            let mut all_point_vecs: Vec<Vec<ManifoldVec2>> = Vec::new();
+            
+            // Parse outer polygon points
+            let points_table: mlua::Table = params.get("points")?;
+            let mut outer_points: Vec<ManifoldVec2> = Vec::new();
+            for pair in points_table.pairs::<i64, mlua::Table>() {
+                if let Ok((_, pt)) = pair {
+                    let x: f64 = pt.get(1).or_else(|_| pt.get("x")).unwrap_or(0.0);
+                    let y: f64 = pt.get(2).or_else(|_| pt.get("y")).unwrap_or(0.0);
+                    outer_points.push(ManifoldVec2 { x, y });
+                }
+            }
+            
+            if outer_points.len() < 3 {
+                return Err(anyhow!("linear_extrude requires at least 3 points"));
+            }
+            all_point_vecs.push(outer_points);
+            
+            // Parse holes if present
+            if let Ok(holes_table) = params.get::<_, mlua::Table>("holes") {
+                for pair in holes_table.pairs::<i64, mlua::Table>() {
+                    if let Ok((_, hole_points_table)) = pair {
+                        let mut hole_points: Vec<ManifoldVec2> = Vec::new();
+                        for pt_pair in hole_points_table.pairs::<i64, mlua::Table>() {
+                            if let Ok((_, pt)) = pt_pair {
+                                let x: f64 = pt.get(1).or_else(|_| pt.get("x")).unwrap_or(0.0);
+                                let y: f64 = pt.get(2).or_else(|_| pt.get("y")).unwrap_or(0.0);
+                                hole_points.push(ManifoldVec2 { x, y });
+                            }
+                        }
+                        if hole_points.len() >= 3 {
+                            all_point_vecs.push(hole_points);
+                        }
+                    }
+                }
+            }
+            
+            // Create all SimplePolygon objects via FFI and keep them alive
+            let mut simple_polygon_ptrs: Vec<*mut ManifoldSimplePolygon> = Vec::new();
+            for mut points in all_point_vecs {
+                let poly_ptr = unsafe {
+                    manifold_simple_polygon(
+                        manifold_alloc_simple_polygon() as *mut c_void,
+                        points.as_mut_ptr(),
+                        points.len(),
+                    )
+                };
+                simple_polygon_ptrs.push(poly_ptr);
+            }
+            
+            // Create Polygons from the SimplePolygon pointers
+            let polygons_ptr = unsafe {
+                manifold_polygons(
+                    manifold_alloc_polygons() as *mut c_void,
+                    simple_polygon_ptrs.as_mut_ptr(),
+                    simple_polygon_ptrs.len(),
+                )
+            };
+            
+            // Perform extrusion
+            let manifold_ptr = unsafe {
+                manifold_extrude(
+                    manifold_alloc_manifold() as *mut c_void,
+                    polygons_ptr,
+                    height,
+                    1,    // slices/divisions
+                    0.0,  // twist
+                    1.0,  // scale_x
+                    1.0,  // scale_y
+                )
+            };
+            
+            // Clean up - delete the polygons 
+            // Note: We don't delete the SimplePolygons individually because
+            // manifold_polygons takes ownership of them
+            unsafe {
+                manifold_delete_polygons(polygons_ptr);
+            }
+            
+            // Convert raw pointer to Manifold
+            let manifold: Manifold = unsafe { std::mem::transmute(manifold_ptr) };
+            
+            Ok(manifold)
         }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }

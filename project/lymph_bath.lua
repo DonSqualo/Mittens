@@ -231,17 +231,29 @@ simulation({
 })
 
 -- View Configuration
+-- Bath is 2000x600x400mm centered at origin
 
 view({
 	flat_shading = true,
 	camera = {
-		position = { -4229, -2837, 1706 },
-		target = { -378, 458, 54 },
-		up = { 0, 0, 1 },
+		position = { 1800, -2200, 1000 },
+		target = { 0, 0, 200 },
+		fov = 45,
 	},
-	projection = "perspective",
-	fov = 30,
 })
+
+-- Debug: Check view state
+local View = require("stdlib.view")
+local ser = View.serialize()
+print("=== View Debug ===")
+print("flat_shading:", ser.flat_shading)
+if ser.camera then
+  print("camera.position:", ser.camera.position[1], ser.camera.position[2], ser.camera.position[3])
+  print("camera.target:", ser.camera.target[1], ser.camera.target[2], ser.camera.target[3])
+  print("camera.fov:", ser.camera.fov)
+else
+  print("camera: NIL")
+end
 
 -- Stage 11: Acoustic Field Visualization
 

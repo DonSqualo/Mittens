@@ -33,6 +33,7 @@ clap = { version = "4.4", features = ["derive"] }
 
 # CSG geometry
 manifold3d = "0.0.6"
+manifold3d-sys = "0.0.6"
 
 # 3MF export (ZIP with XML)
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
