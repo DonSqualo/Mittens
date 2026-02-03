@@ -262,11 +262,10 @@ simulation({
 view({
   flat_shading = true,
   camera = {
-    position = { 0, -5000, 500 },
-    target = { 0, 0, 200 },
-    up = { 0, 0, 1 },
+    position = {-4229, -2837, 1706},
+    target = {-378, 458, 54},
+    up = {0, 0, 1},
   },
-  -- XZ plane display (looking from Y toward XZ plane)
   projection = "perspective",
   fov = 30,
 })
