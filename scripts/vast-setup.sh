@@ -18,6 +18,8 @@ apt-get install -y \
     curl \
     pkg-config \
     libssl-dev \
+    libclang-dev \
+    llvm-dev \
     python3 \
     python3-pip \
     ffmpeg \
