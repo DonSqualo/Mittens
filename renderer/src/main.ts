@@ -1572,6 +1572,36 @@ function update_time_display() {
   time_display.textContent = `t: ${simulation_time.toFixed(2)}s`;
 }
 
+// Camera position display
+const camera_info = document.getElementById('camera-info')!;
+const camera_pos_el = document.getElementById('camera-pos')!;
+const camera_target_el = document.getElementById('camera-target')!;
+
+function update_camera_display() {
+  const p = camera.position;
+  const t = controls.target;
+  camera_pos_el.textContent = `pos: [${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}]`;
+  camera_target_el.textContent = `target: [${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}]`;
+}
+
+camera_info.addEventListener('click', () => {
+  const p = camera.position;
+  const t = controls.target;
+  const config = `camera = {
+  position = {${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}},
+  target = {${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}},
+  up = {0, 0, 1}
+}`;
+  navigator.clipboard.writeText(config).then(() => {
+    camera_info.style.borderColor = '#0a8';
+    setTimeout(() => camera_info.style.borderColor = '#444', 500);
+  });
+});
+
+// Update camera display on control changes
+controls.addEventListener('change', update_camera_display);
+update_camera_display();
+
 // Start
 connect_websocket();
 animate();
