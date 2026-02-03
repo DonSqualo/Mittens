@@ -1587,15 +1587,28 @@ function update_camera_display() {
 camera_info.addEventListener('click', () => {
   const p = camera.position;
   const t = controls.target;
-  const config = `camera = {
-  position = {${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}},
-  target = {${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}},
-  up = {0, 0, 1}
-}`;
-  navigator.clipboard.writeText(config).then(() => {
+  const config = `camera = {\n  position = {${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}},\n  target = {${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}},\n  up = {0, 0, 1}\n}`;
+  
+  // Fallback for HTTP (clipboard API needs HTTPS)
+  const textarea = document.createElement('textarea');
+  textarea.value = config;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand('copy');
     camera_info.style.borderColor = '#0a8';
-    setTimeout(() => camera_info.style.borderColor = '#444', 500);
-  });
+    camera_info.style.background = 'rgba(0,100,80,0.3)';
+    setTimeout(() => {
+      camera_info.style.borderColor = '#444';
+      camera_info.style.background = 'rgba(0,0,0,0.8)';
+    }, 500);
+  } catch (e) {
+    console.log('Copy failed, config:', config);
+    alert(config);
+  }
+  document.body.removeChild(textarea);
 });
 
 // Update camera display on control changes
