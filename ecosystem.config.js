@@ -4,7 +4,7 @@ module.exports = {
       name: 'mittens-server',
       cwd: './server',
       script: './target/release/scriptcad-server',
-      args: '../project/extrusion_test.lua',
+      args: '../project/insert.lua',
       interpreter: 'none',
       watch: false,
       env: {

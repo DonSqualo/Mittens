@@ -427,6 +427,308 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             
             Ok(manifold)
         }
+        "external_thread" => {
+            // ISO metric external thread (male thread)
+            // Class 6g: undersized from nominal for clearance
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            // Clearance for 3D printing (0.2mm recommended)
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+            
+            // ISO 68-1 thread geometry with clearance applied
+            let thread_depth = 0.54125 * pitch;
+            let major_radius = major_diameter / 2.0 - clearance;  // Crests move inward
+            let minor_radius = major_radius - thread_depth;       // Roots follow
+            
+            let num_turns = height / pitch;
+            let total_segments = ((num_turns + 1.0) * segments_per_turn as f64).ceil() as usize;
+            let pi2 = 2.0 * std::f64::consts::PI;
+            
+            // Thread profile: trapezoidal cross-section (approximating 60° V thread)
+            let half_pitch = pitch / 2.0;
+            let thread_angle_factor = 0.577; // tan(30°) for 60° thread
+            let crest_half_width = thread_depth * thread_angle_factor * 0.5;
+            let root_half_width = half_pitch * 0.9;
+            
+            // Generate vertices for closed helical solid
+            // Each segment has 4 profile points forming a quad
+            let num_profile_pts = 4usize;
+            // No separate cap center vertices - caps are quad faces
+            let num_verts = (total_segments + 1) * num_profile_pts;
+            let mut vert_props: Vec<f32> = Vec::with_capacity(num_verts * 6);
+            
+            for seg in 0..=total_segments {
+                let t = seg as f64 / segments_per_turn as f64;
+                let angle = t * pi2;
+                let z_center = t * pitch - half_pitch;
+                
+                let cos_a = angle.cos();
+                let sin_a = angle.sin();
+                
+                // Profile quad in helical coords:
+                // 0: inner-bottom (minor radius, z - root_half_width)
+                // 1: outer-bottom (major radius, z - crest_half_width)  
+                // 2: outer-top (major radius, z + crest_half_width)
+                // 3: inner-top (minor radius, z + root_half_width)
+                
+                let z0 = z_center - root_half_width;
+                let z1 = z_center - crest_half_width;
+                let z2 = z_center + crest_half_width;
+                let z3 = z_center + root_half_width;
+                
+                let nx = cos_a as f32;
+                let ny = sin_a as f32;
+                
+                vert_props.extend_from_slice(&[
+                    (minor_radius * cos_a) as f32, (minor_radius * sin_a) as f32, z0 as f32,
+                    nx * 0.5, ny * 0.5, -0.866,
+                ]);
+                vert_props.extend_from_slice(&[
+                    (major_radius * cos_a) as f32, (major_radius * sin_a) as f32, z1 as f32,
+                    nx, ny, 0.0,
+                ]);
+                vert_props.extend_from_slice(&[
+                    (major_radius * cos_a) as f32, (major_radius * sin_a) as f32, z2 as f32,
+                    nx, ny, 0.0,
+                ]);
+                vert_props.extend_from_slice(&[
+                    (minor_radius * cos_a) as f32, (minor_radius * sin_a) as f32, z3 as f32,
+                    nx * 0.5, ny * 0.5, 0.866,
+                ]);
+            }
+            
+            // Generate triangles
+            let mut tri_verts: Vec<u32> = Vec::new();
+            
+            // Start cap: close the first quad profile (triangulate the quad)
+            // Quad vertices: 0, 1, 2, 3 → triangles (0,2,1), (0,3,2)
+            tri_verts.extend_from_slice(&[0, 2, 1]);
+            tri_verts.extend_from_slice(&[0, 3, 2]);
+            
+            // Side faces connecting profile rings
+            for seg in 0..total_segments {
+                let base = (seg * num_profile_pts) as u32;
+                let next = ((seg + 1) * num_profile_pts) as u32;
+                
+                for i in 0..num_profile_pts as u32 {
+                    let next_i = (i + 1) % num_profile_pts as u32;
+                    // Quad face as two triangles
+                    tri_verts.extend_from_slice(&[base + i, base + next_i, next + next_i]);
+                    tri_verts.extend_from_slice(&[base + i, next + next_i, next + i]);
+                }
+            }
+            
+            // End cap: close the last quad profile
+            let last_ring = (total_segments * num_profile_pts) as u32;
+            // Quad vertices: last_ring+0, +1, +2, +3 → triangles with opposite winding
+            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 1, last_ring + 2]);
+            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 2, last_ring + 3]);
+            
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+            
+            // Create manifold from mesh
+            let thread_mesh: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            
+            // Create core cylinder with slight overlap into thread root for proper union
+            // The thread root is at minor_radius, so we extend core slightly beyond
+            let core_overlap = 0.05; // mm overlap to ensure solid merge
+            let core = Manifold::new_cylinder(
+                pos(height),
+                pos(minor_radius + core_overlap),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            );
+            
+            // Union core with thread first, then trim - this ensures single solid
+            let unioned = core.union(&thread_mesh);
+            
+            // Trim to height bounds
+            let bound = Manifold::new_cylinder(
+                pos(height),
+                pos(major_radius + 0.1),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            );
+            
+            let result = unioned.intersection(&bound);
+            
+            Ok(result)
+        }
+        "internal_thread" => {
+            // ISO metric internal thread (female thread)
+            // Class 6H: reference dimension, bore defines nominal
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            
+            // ISO 68-1 thread geometry (female stays at nominal)
+            let thread_depth = 0.54125 * pitch;
+            let major_radius = major_diameter / 2.0;  // Bore at nominal
+            let minor_radius = major_radius - thread_depth;  // Crests inward
+            
+            // Create outer cylinder (the tube wall)
+            let wall_thickness = thread_depth * 3.0;
+            let outer_radius = major_radius + wall_thickness;
+            
+            let outer = Manifold::new_cylinder(
+                pos(height),
+                pos(outer_radius),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            );
+            
+            // Create inner bore at MAJOR diameter (thread roots are at major)
+            let inner_bore = Manifold::new_cylinder(
+                pos(height + 0.02),
+                pos(major_radius),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            ).translate(Vec3::new(0.0, 0.0, -0.01));
+            
+            let tube = outer.difference(&inner_bore);
+            
+            // Generate helical thread mesh pointing INWARD (from major to minor)
+            let num_turns = height / pitch;
+            let total_segments = ((num_turns + 1.0) * segments_per_turn as f64).ceil() as usize;
+            let pi2 = 2.0 * std::f64::consts::PI;
+            
+            // Thread profile for internal: points INWARD
+            let half_pitch = pitch / 2.0;
+            let thread_angle_factor = 0.577;
+            let crest_half_width = thread_depth * thread_angle_factor * 0.5;
+            let root_half_width = half_pitch * 0.9;
+            
+            let num_profile_pts = 4usize;
+            // No separate cap center vertices - caps are quad faces
+            let num_verts = (total_segments + 1) * num_profile_pts;
+            let mut vert_props: Vec<f32> = Vec::with_capacity(num_verts * 6);
+            
+            for seg in 0..=total_segments {
+                let t = seg as f64 / segments_per_turn as f64;
+                let angle = t * pi2;
+                let z_center = t * pitch - half_pitch;
+                
+                let cos_a = angle.cos();
+                let sin_a = angle.sin();
+                
+                // Profile quad pointing INWARD:
+                // 0: outer-bottom (major radius, z - root_half_width)
+                // 1: inner-bottom (minor radius, z - crest_half_width) - thread crest
+                // 2: inner-top (minor radius, z + crest_half_width) - thread crest
+                // 3: outer-top (major radius, z + root_half_width)
+                
+                let z0 = z_center - root_half_width;
+                let z1 = z_center - crest_half_width;
+                let z2 = z_center + crest_half_width;
+                let z3 = z_center + root_half_width;
+                
+                let nx = -(cos_a as f32); // normal pointing inward
+                let ny = -(sin_a as f32);
+                
+                vert_props.extend_from_slice(&[
+                    (major_radius * cos_a) as f32, (major_radius * sin_a) as f32, z0 as f32,
+                    nx * 0.5, ny * 0.5, -0.866,
+                ]);
+                vert_props.extend_from_slice(&[
+                    (minor_radius * cos_a) as f32, (minor_radius * sin_a) as f32, z1 as f32,
+                    nx, ny, 0.0,
+                ]);
+                vert_props.extend_from_slice(&[
+                    (minor_radius * cos_a) as f32, (minor_radius * sin_a) as f32, z2 as f32,
+                    nx, ny, 0.0,
+                ]);
+                vert_props.extend_from_slice(&[
+                    (major_radius * cos_a) as f32, (major_radius * sin_a) as f32, z3 as f32,
+                    nx * 0.5, ny * 0.5, 0.866,
+                ]);
+            }
+            
+            // Generate triangles (winding for inward-facing)
+            let mut tri_verts: Vec<u32> = Vec::new();
+            
+            // Start cap: close the first quad profile
+            // Quad vertices: 0, 1, 2, 3 → triangles with reversed winding for inward
+            tri_verts.extend_from_slice(&[0, 1, 2]);
+            tri_verts.extend_from_slice(&[0, 2, 3]);
+            
+            // Side faces connecting profile rings
+            for seg in 0..total_segments {
+                let base = (seg * num_profile_pts) as u32;
+                let next = ((seg + 1) * num_profile_pts) as u32;
+                
+                for i in 0..num_profile_pts as u32 {
+                    let next_i = (i + 1) % num_profile_pts as u32;
+                    tri_verts.extend_from_slice(&[base + i, next + next_i, base + next_i]);
+                    tri_verts.extend_from_slice(&[base + i, next + i, next + next_i]);
+                }
+            }
+            
+            // End cap: close the last quad profile
+            let last_ring = (total_segments * num_profile_pts) as u32;
+            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 2, last_ring + 1]);
+            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 3, last_ring + 2]);
+            
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+            
+            let thread_mesh: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            
+            // Union tube with untrimmed thread first for better merging
+            let unioned = tube.union(&thread_mesh);
+            
+            // Trim to height bounds
+            let bound = Manifold::new_cylinder(
+                pos(height),
+                pos(outer_radius + 0.1),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            );
+            
+            let trimmed = unioned.intersection(&bound);
+            
+            // Clear the inner bore at minor radius (thread crests)
+            // with slight overlap for clean subtraction
+            let clear_bore = Manifold::new_cylinder(
+                pos(height + 0.02),
+                pos(minor_radius - 0.01), // Slightly smaller to ensure clean cut
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            ).translate(Vec3::new(0.0, 0.0, -0.01));
+            
+            Ok(trimmed.difference(&clear_bore))
+        }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }
 }

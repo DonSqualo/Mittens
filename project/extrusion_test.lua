@@ -1,78 +1,33 @@
--- T-slot profile extrusion test
--- Tests polygon extrusion with holes using Manifold
+-- M27 Intermediate Ring Thread Test
+-- Tests ISO metric thread generation with M27 specifications
+-- Creates a parametric intermediate ring with:
+--   - M27 external thread on outside (male, H5)
+--   - M27 internal thread on inside (female, H5)
+--   - Wall thickness: 2mm
 
 local Mittens = require("stdlib")
-local Shapes2D = require("stdlib.shapes2d")
+local Threads = Mittens.threads
 
--- 40x40mm T-slot profile
-local size = 40
-local hs = size / 2  -- half size
-
--- Outer boundary (CCW)
-local outer = {
-  {-hs, -hs},
-  {hs, -hs},
-  {hs, hs},
-  {-hs, hs},
-}
-
--- T-slot openings as "holes" (CW winding)
--- Slot opening: 10mm wide, 5mm deep from each face
-local slot_w = 5   -- half slot width
-local slot_d = 5   -- slot depth
-
--- Bottom slot (y = -hs)
-local bottom_slot = {
-  {-slot_w, -hs + slot_d},
-  {-slot_w, -hs},
-  {slot_w, -hs},
-  {slot_w, -hs + slot_d},
-}
-
--- Top slot (y = +hs)
-local top_slot = {
-  {slot_w, hs - slot_d},
-  {slot_w, hs},
-  {-slot_w, hs},
-  {-slot_w, hs - slot_d},
-}
-
--- Left slot (x = -hs)
-local left_slot = {
-  {-hs + slot_d, slot_w},
-  {-hs, slot_w},
-  {-hs, -slot_w},
-  {-hs + slot_d, -slot_w},
-}
-
--- Right slot (x = +hs)
-local right_slot = {
-  {hs - slot_d, -slot_w},
-  {hs, -slot_w},
-  {hs, slot_w},
-  {hs - slot_d, slot_w},
-}
-
--- Create the extrusion with holes
-local profile = linear_extrude({
-  points = outer,
-  holes = {bottom_slot, top_slot, left_slot, right_slot},
-  height = 100,
+-- Create M27 intermediate ring (3mm coarse pitch, 5mm height)
+local m27_ring = Threads.intermediate_ring({
+  size = "M27",
+  height = 5,      -- "H 5" from the product specification
+  wall_thickness = 2,
+  pitch = 3,       -- M27 coarse pitch
 })
-  :color(0.78, 0.78, 0.80, 1.0)
-  :tag("t_slot_profile")
 
-Mittens.register(profile)
+-- Name and register for rendering
+m27_ring:name("M27 Intermediate Ring")
+Mittens.register(m27_ring)
 
+-- Configure view
 view({
-  flat_shading = true,
   camera = {
-    position = {120, 100, 150},
-    target = {0, 0, 50},
-    fov = 35
+    position = {50, 50, 80},
+    target = {0, 0, 2.5},
+    up = {0, 0, 1}
   }
 })
 
-print("=== T-Slot Profile Extrusion ===")
-
+-- Return serialized scene for rendering
 return Mittens.serialize()

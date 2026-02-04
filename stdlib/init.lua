@@ -19,6 +19,7 @@ Mittens.shapes2d = require("stdlib.shapes2d")
 Mittens.simulation = require("stdlib.simulation")
 Mittens.acoustics = require("stdlib.acoustics")
 Mittens.particles = require("stdlib.particles")
+Mittens.threads = require("stdlib.threads")
 
 -- Export primitive functions to global scope
 box = Mittens.primitives.box
