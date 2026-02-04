@@ -9,6 +9,8 @@ use std::alloc::{alloc, Layout};
 use std::collections::HashMap;
 use std::os::raw::c_void;
 
+use crate::thread_primitives::{generate_external_thread, generate_internal_thread};
+
 /// Mesh data for WebSocket transfer
 pub struct MeshData {
     pub positions: Vec<f32>,
@@ -301,6 +303,98 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             );
 
             Ok(outer.difference(&inner))
+        }
+        "external_thread" => {
+            // ISO metric external thread (male thread)
+            // Single-surface swept helix - no boolean operations
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+            
+            let (vert_props, tri_verts) = generate_external_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+            );
+            
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+            
+            tracing::info!("external_thread: {} verts, {} tris (single-surface)", actual_verts, num_tris);
+            
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            
+            if let Some(err) = result.last_operation_status() {
+                tracing::warn!("external_thread status: {:?}", err);
+            } else {
+                tracing::info!("external_thread: manifold OK");
+            }
+            
+            Ok(result)
+        }
+        "internal_thread" => {
+            // ISO metric internal thread (female thread)
+            // Single-surface swept helix - no boolean operations
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+            
+            // Wall thickness for the tube
+            let thread_depth = 0.54125 * pitch;
+            let wall_thickness: f64 = params.get::<_, f64>("wall_thickness")
+                .unwrap_or(thread_depth * 5.0);
+            
+            let (vert_props, tri_verts) = generate_internal_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+                wall_thickness,
+            );
+            
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+            
+            tracing::info!("internal_thread: {} verts, {} tris (single-surface)", actual_verts, num_tris);
+            
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            
+            if let Some(err) = result.last_operation_status() {
+                tracing::warn!("internal_thread status: {:?}", err);
+            } else {
+                tracing::info!("internal_thread: manifold OK");
+            }
+            
+            Ok(result)
         }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }
