@@ -68,19 +68,20 @@ local function make_csg_metatable()
       table.insert(self._ops, {op = "scale", x = sx, y = sy, z = sz})
       return self
     end,
-    center = function(self, cx, cy, cz)
+    center = function(self, axes)
+      if type(axes) ~= "string" then
+        error("center() expects a string like 'XY' or 'XYZ'")
+      end
+      local axes_upper = axes:upper()
+      local cx = axes_upper:find("X") ~= nil
+      local cy = axes_upper:find("Y") ~= nil
+      local cz = axes_upper:find("Z") ~= nil
       local bounds = self._bounds
       local dx = cx and -((bounds.min[1] + bounds.max[1]) / 2) or 0
       local dy = cy and -((bounds.min[2] + bounds.max[2]) / 2) or 0
       local dz = cz and -((bounds.min[3] + bounds.max[3]) / 2) or 0
       table.insert(self._ops, {op = "translate", x = dx, y = dy, z = dz})
       return self
-    end,
-    centerXY = function(self)
-      return self:center(true, true, false)
-    end,
-    centered = function(self)
-      return self:center(true, true, true)
     end,
     material = function(self, mat)
       self._material = mat
