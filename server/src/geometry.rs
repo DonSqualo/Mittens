@@ -110,7 +110,15 @@ impl MeshData {
             edge_tris.entry(e2).or_insert_with(Vec::new).push(tri);
         }
 
-        // Keep edges that are: boundary (1 tri) OR crease (normals differ significantly)
+        // View direction for silhouette detection (normal to the projection plane)
+        let view_dir: [f32; 3] = match plane {
+            0 => [0.0, 1.0, 0.0],  // XZ plane: looking along Y
+            1 => [0.0, 0.0, 1.0],  // XY plane: looking along Z (top/bottom)
+            2 => [1.0, 0.0, 0.0],  // YZ plane: looking along X
+            _ => [0.0, 0.0, 1.0],
+        };
+
+        // Keep edges that are: boundary (1 tri) OR crease OR silhouette
         let edges: Vec<(usize, usize)> = edge_tris
             .into_iter()
             .filter(|(_, tris)| {
@@ -120,9 +128,19 @@ impl MeshData {
                 if tris.len() == 2 {
                     let n1 = face_normals[tris[0]];
                     let n2 = face_normals[tris[1]];
-                    // Dot product of normals
+                    
+                    // Crease detection: normals differ significantly
                     let dot = n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2];
-                    return dot < CREASE_THRESHOLD; // Crease edge if normals differ
+                    if dot < CREASE_THRESHOLD {
+                        return true;
+                    }
+                    
+                    // Silhouette detection: one face front-facing, other back-facing
+                    let d1 = n1[0] * view_dir[0] + n1[1] * view_dir[1] + n1[2] * view_dir[2];
+                    let d2 = n2[0] * view_dir[0] + n2[1] * view_dir[1] + n2[2] * view_dir[2];
+                    if d1 * d2 < 0.0 {
+                        return true; // One front-facing, one back-facing
+                    }
                 }
                 false // Non-manifold edge (>2 tris)
             })

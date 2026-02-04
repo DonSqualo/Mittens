@@ -388,17 +388,33 @@ function enter_blueprint_mode(plane: string, sign: number = 1) {
   // Snap ortho camera to clean axis-aligned position
   orthoCamera.position.copy(controls.target);
   
+  // Get the camera's current "up" projected onto the target plane
+  // This preserves rotation around the view axis based on approach direction
+  const camUp = camera.up.clone();
+  const camRight = new THREE.Vector3();
+  camRight.crossVectors(camera.getWorldDirection(new THREE.Vector3()), camUp).normalize();
+  
   if (plane === 'XY') {
     // Looking along Z axis at the XY plane
     orthoCamera.position.z += distance * sign;
-    orthoCamera.up.set(0, 1, 0);
+    // Determine up based on which cardinal direction camera was mostly facing
+    const camDir = camera.position.clone().sub(controls.target).normalize();
+    if (Math.abs(camDir.x) > Math.abs(camDir.y)) {
+      // Approached from X side - up should be X (rotated 90° from before)
+      orthoCamera.up.set(sign * -Math.sign(camDir.x || 1), 0, 0);
+    } else {
+      // Approached from Y side - up should be Y
+      orthoCamera.up.set(0, sign * -Math.sign(camDir.y || 1), 0);
+    }
   } else if (plane === 'XZ') {
     // Looking along Y axis at the XZ plane  
     orthoCamera.position.y += distance * sign;
+    // Z is always up for side views (standard convention)
     orthoCamera.up.set(0, 0, 1);
   } else if (plane === 'YZ') {
     // Looking along X axis at the YZ plane
     orthoCamera.position.x += distance * sign;
+    // Z is always up for side views (standard convention)
     orthoCamera.up.set(0, 0, 1);
   }
   
