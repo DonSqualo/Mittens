@@ -180,6 +180,19 @@ fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mps
                     result.flat_shading
                 );
                 let _ = tx.send(binary);
+
+                // Generate and send blueprints for all three planes
+                for plane in 0..3 {
+                    let blueprint = result.mesh.generate_blueprint(plane);
+                    let plane_names = ["XZ", "XY", "YZ"];
+                    info!(
+                        "Generated blueprint {}: {} edges, {} bytes",
+                        plane_names[plane as usize],
+                        (blueprint.len().saturating_sub(12)) / 16,
+                        blueprint.len()
+                    );
+                    let _ = tx.send(blueprint);
+                }
             }
             Err(e) => error!("Lua error: {}", e),
         }

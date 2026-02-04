@@ -71,6 +71,10 @@ let measurement_markers: THREE.Group | null = null;
 // Probe line visualizations
 let probe_lines: THREE.Group | null = null;
 
+// Blueprint edges storage (per plane)
+const blueprint_edges = new Map<string, THREE.LineSegments>();
+const blueprint_data = new Map<string, {edges: Float32Array, count: number}>();
+
 // Circuit overlay element and 3D anchor
 const circuit_overlay = document.getElementById('circuit-overlay')!;
 const circuit_anchor = new THREE.Vector3(0, 0, 60); // Anchor point above Z axis
@@ -401,6 +405,16 @@ function enter_blueprint_mode(plane: string, sign: number = 1) {
   orthoCamera.lookAt(controls.target);
   update_ortho_frustum();
 
+  // Show blueprint edges for this plane
+  for (const [bp_plane, lines] of blueprint_edges.entries()) {
+    lines.visible = (bp_plane === plane);
+  }
+
+  // Hide mesh in blueprint mode
+  if (current_mesh) {
+    current_mesh.visible = false;
+  }
+
   // Show blueprint indicator
   update_blueprint_indicator(plane);
 }
@@ -411,6 +425,16 @@ function exit_blueprint_mode() {
 
   console.log('Exiting blueprint mode');
   blueprint_mode = null;
+
+  // Hide all blueprint edges
+  for (const lines of blueprint_edges.values()) {
+    lines.visible = false;
+  }
+
+  // Show mesh again
+  if (current_mesh) {
+    current_mesh.visible = true;
+  }
 
   // Clear blueprint indicator
   update_blueprint_indicator(null);
@@ -1042,6 +1066,29 @@ function draw_nanovna(data: { frequencies: Float32Array, magnitudes: Float32Arra
   ctx.fillText(`MIN: ${data.min_s11_db.toFixed(1)} dB @ ${(data.min_s11_freq / 1e6).toFixed(2)} MHz`, width - 180, 15);
 }
 
+// Parse blueprint data
+function parse_blueprint_data(buffer: ArrayBuffer): { plane: string, edges: Float32Array, count: number } | null {
+  const header = new Uint8Array(buffer, 0, 8);
+  const header_str = String.fromCharCode(...header);
+
+  let plane: string;
+  if (header_str.startsWith('BP_XZ')) {
+    plane = 'XZ';
+  } else if (header_str.startsWith('BP_XY')) {
+    plane = 'XY';
+  } else if (header_str.startsWith('BP_YZ')) {
+    plane = 'YZ';
+  } else {
+    return null;
+  }
+
+  const view = new DataView(buffer);
+  const num_edges = view.getUint32(8, true);
+  const edges = new Float32Array(buffer, 12, num_edges * 4);
+
+  return { plane, edges, count: num_edges };
+}
+
 // Parse circuit data
 function parse_circuit_data(buffer: ArrayBuffer) {
   const view = new DataView(buffer);
@@ -1062,6 +1109,61 @@ function parse_circuit_data(buffer: ArrayBuffer) {
   };
 }
 
+// Create and display blueprint line segments
+function create_blueprint_lines(plane: string, edges: Float32Array, count: number) {
+  // Remove old blueprint for this plane if it exists
+  if (blueprint_edges.has(plane)) {
+    const old_lines = blueprint_edges.get(plane)!;
+    scene.remove(old_lines);
+    old_lines.geometry.dispose();
+    if (old_lines.material instanceof THREE.Material) {
+      old_lines.material.dispose();
+    }
+  }
+
+  // Create geometry from projected edges
+  const positions: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const x1 = edges[i * 4];
+    const y1 = edges[i * 4 + 1];
+    const x2 = edges[i * 4 + 2];
+    const y2 = edges[i * 4 + 3];
+
+    // Map 2D coordinates to 3D based on plane
+    let p1, p2;
+    if (plane === 'XY') {
+      p1 = new THREE.Vector3(x1, y1, 0);
+      p2 = new THREE.Vector3(x2, y2, 0);
+    } else if (plane === 'XZ') {
+      p1 = new THREE.Vector3(x1, 0, y1);
+      p2 = new THREE.Vector3(x2, 0, y2);
+    } else if (plane === 'YZ') {
+      p1 = new THREE.Vector3(0, x1, y1);
+      p2 = new THREE.Vector3(0, x2, y2);
+    } else {
+      continue;
+    }
+
+    positions.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+
+  const material = new THREE.LineBasicMaterial({
+    color: 0x00ffff,
+    linewidth: 2,
+    transparent: true,
+    opacity: 0.8,
+  });
+
+  const lines = new THREE.LineSegments(geometry, material);
+  scene.add(lines);
+  blueprint_edges.set(plane, lines);
+
+  console.log(`Blueprint ${plane}: ${count} edges created`);
+}
+
 // Display circuit as 2D overlay
 function display_circuit_overlay(circuit: { size: { width: number, height: number }, svg: string }) {
   circuit_overlay.innerHTML = circuit.svg;
@@ -1075,6 +1177,16 @@ function update_mesh(buffer: ArrayBuffer) {
   const header = new Uint8Array(buffer, 0, 8);
   const header_5 = String.fromCharCode(...header.slice(0, 5));
   const header_8 = String.fromCharCode(...header);
+
+  // Handle blueprint data
+  if (header_8.startsWith('BP_XY') || header_8.startsWith('BP_XZ') || header_8.startsWith('BP_YZ')) {
+    const blueprint_result = parse_blueprint_data(buffer);
+    if (blueprint_result) {
+      blueprint_data.set(blueprint_result.plane, { edges: blueprint_result.edges, count: blueprint_result.count });
+      create_blueprint_lines(blueprint_result.plane, blueprint_result.edges, blueprint_result.count);
+    }
+    return;
+  }
 
   // Handle view config
   if (header_8.startsWith('VIEW')) {
@@ -1210,6 +1322,16 @@ function update_mesh(buffer: ArrayBuffer) {
     scene.remove(probe_lines);
     probe_lines = null;
   }
+  // Clear blueprint edges and data
+  for (const lines of blueprint_edges.values()) {
+    scene.remove(lines);
+    lines.geometry.dispose();
+    if (lines.material instanceof THREE.Material) {
+      lines.material.dispose();
+    }
+  }
+  blueprint_edges.clear();
+  blueprint_data.clear();
   // Hide circuit overlay
   circuit_overlay.classList.remove('visible');
   circuit_overlay.innerHTML = '';

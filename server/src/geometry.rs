@@ -50,6 +50,68 @@ impl MeshData {
 
         data
     }
+
+    /// Generate blueprint edges projected onto a plane
+    /// plane: 0=XZ, 1=XY, 2=YZ
+    pub fn generate_blueprint(&self, plane: u8) -> Vec<u8> {
+        // Extract all edges from triangles
+        let mut edges = Vec::new();
+        for tri in 0..(self.indices.len() / 3) {
+            let i0 = self.indices[tri * 3] as usize;
+            let i1 = self.indices[tri * 3 + 1] as usize;
+            let i2 = self.indices[tri * 3 + 2] as usize;
+
+            // Add three edges per triangle
+            edges.push((i0, i1));
+            edges.push((i1, i2));
+            edges.push((i2, i0));
+        }
+
+        // Project edges onto the specified plane
+        let mut projected = Vec::new();
+        for (i0, i1) in edges {
+            if i0 >= self.positions.len() / 3 || i1 >= self.positions.len() / 3 {
+                continue;
+            }
+
+            let p0 = [
+                self.positions[i0 * 3],
+                self.positions[i0 * 3 + 1],
+                self.positions[i0 * 3 + 2],
+            ];
+            let p1 = [
+                self.positions[i1 * 3],
+                self.positions[i1 * 3 + 1],
+                self.positions[i1 * 3 + 2],
+            ];
+
+            // Project to 2D based on plane
+            let (x0, y0, x1, y1) = match plane {
+                0 => (p0[0], p0[2], p1[0], p1[2]), // XZ plane (X, Z)
+                1 => (p0[0], p0[1], p1[0], p1[1]), // XY plane (X, Y)
+                2 => (p0[1], p0[2], p1[1], p1[2]), // YZ plane (Y, Z)
+                _ => continue,
+            };
+
+            projected.push([x0, y0, x1, y1]);
+        }
+
+        // Build binary message
+        let plane_names = ["BP_XZ\0\0\0", "BP_XY\0\0\0", "BP_YZ\0\0\0"];
+        let header = plane_names[plane as usize];
+
+        let mut data = Vec::new();
+        data.extend_from_slice(header.as_bytes());
+        data.extend_from_slice(&(projected.len() as u32).to_le_bytes());
+
+        for edge in projected {
+            for &coord in &edge {
+                data.extend_from_slice(&coord.to_le_bytes());
+            }
+        }
+
+        data
+    }
 }
 
 extern "C" {
