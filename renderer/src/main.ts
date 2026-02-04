@@ -388,12 +388,6 @@ function enter_blueprint_mode(plane: string, sign: number = 1) {
   // Snap ortho camera to clean axis-aligned position
   orthoCamera.position.copy(controls.target);
   
-  // Get the camera's current "up" projected onto the target plane
-  // This preserves rotation around the view axis based on approach direction
-  const camUp = camera.up.clone();
-  const camRight = new THREE.Vector3();
-  camRight.crossVectors(camera.getWorldDirection(new THREE.Vector3()), camUp).normalize();
-  
   if (plane === 'XY') {
     // Looking along Z axis at the XY plane
     orthoCamera.position.z += distance * sign;
