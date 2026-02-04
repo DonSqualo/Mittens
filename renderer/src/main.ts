@@ -1303,7 +1303,10 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 
 // WebSocket
 function connect_websocket() {
-  const ws = new WebSocket(`ws://${window.location.host}/ws`);
+  // Use path-based WebSocket routing through nginx
+  const basePath = import.meta.env.BASE_URL || '/';
+  const wsPath = basePath === '/' ? '/ws' : `${basePath}ws`;
+  const ws = new WebSocket(`ws://${window.location.host}${wsPath}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
