@@ -28,6 +28,7 @@ mod export;
 mod fdtd;
 mod field;
 mod geometry;
+mod thread_primitives;
 mod meep;
 mod nanovna;
 mod voxel;
