@@ -309,7 +309,9 @@ type ColormapFn = (t: number) => THREE.Color;
 
 // Blueprint mode functions
 // Check if camera is aligned with one of the three principal planes
-function check_camera_alignment(): string | null {
+// Returns { plane: 'XY'|'XZ'|'YZ', sign: 1|-1 } or null
+// sign indicates which side of the plane: +1 = looking from positive axis, -1 = from negative
+function check_camera_alignment(): { plane: string, sign: number } | null {
   if (!camera) return null;
 
   // Get camera direction (looking direction)
@@ -326,9 +328,10 @@ function check_camera_alignment(): string | null {
 
   // Check dot product against each plane normal
   for (const [name, normal] of Object.entries(planes)) {
-    const dot = Math.abs(direction.dot(normal));
-    if (dot >= ALIGNMENT_THRESHOLD) {
-      return name;
+    const dot = direction.dot(normal);
+    if (Math.abs(dot) >= ALIGNMENT_THRESHOLD) {
+      // sign: -1 means looking along +normal (from + side), +1 means from - side
+      return { plane: name, sign: dot < 0 ? 1 : -1 };
     }
   }
 
@@ -362,11 +365,13 @@ function update_ortho_frustum() {
 }
 
 // Enter blueprint mode for a specific plane
-function enter_blueprint_mode(plane: string) {
-  if (blueprint_mode === plane) return; // Already in this mode
+// sign: +1 = viewing from positive axis side, -1 = from negative side
+function enter_blueprint_mode(plane: string, sign: number = 1) {
+  const mode_key = `${plane}${sign > 0 ? '+' : '-'}`;
+  if (blueprint_mode === mode_key) return; // Already in this mode
 
-  console.log(`Entering blueprint mode: ${plane}`);
-  blueprint_mode = plane;
+  console.log(`Entering blueprint mode: ${plane} (from ${sign > 0 ? '+' : '-'} side)`);
+  blueprint_mode = mode_key;
 
   // Create ortho camera if not already created
   if (!orthoCamera) {
@@ -380,16 +385,16 @@ function enter_blueprint_mode(plane: string) {
   orthoCamera.position.copy(controls.target);
   
   if (plane === 'XY') {
-    // Looking down Z axis at the XY plane
-    orthoCamera.position.z += distance;
+    // Looking along Z axis at the XY plane
+    orthoCamera.position.z += distance * sign;
     orthoCamera.up.set(0, 1, 0);
   } else if (plane === 'XZ') {
-    // Looking down Y axis at the XZ plane  
-    orthoCamera.position.y -= distance;
+    // Looking along Y axis at the XZ plane  
+    orthoCamera.position.y += distance * sign;
     orthoCamera.up.set(0, 0, 1);
   } else if (plane === 'YZ') {
-    // Looking down X axis at the YZ plane
-    orthoCamera.position.x += distance;
+    // Looking along X axis at the YZ plane
+    orthoCamera.position.x += distance * sign;
     orthoCamera.up.set(0, 0, 1);
   }
   
@@ -1339,14 +1344,17 @@ function animate() {
   update_circuit_position();
 
   // Check camera alignment for blueprint mode
-  const aligned_plane = check_camera_alignment();
-  if (aligned_plane && !blueprint_mode) {
-    enter_blueprint_mode(aligned_plane);
-  } else if (!aligned_plane && blueprint_mode) {
+  const alignment = check_camera_alignment();
+  if (alignment && !blueprint_mode) {
+    enter_blueprint_mode(alignment.plane, alignment.sign);
+  } else if (!alignment && blueprint_mode) {
     exit_blueprint_mode();
-  } else if (aligned_plane && blueprint_mode && aligned_plane !== blueprint_mode) {
-    // Switched to a different plane
-    enter_blueprint_mode(aligned_plane);
+  } else if (alignment && blueprint_mode) {
+    const mode_key = `${alignment.plane}${alignment.sign > 0 ? '+' : '-'}`;
+    if (mode_key !== blueprint_mode) {
+      // Switched to a different plane or side
+      enter_blueprint_mode(alignment.plane, alignment.sign);
+    }
   }
 
   // Use appropriate camera for rendering
