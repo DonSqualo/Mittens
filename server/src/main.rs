@@ -30,7 +30,9 @@ mod nanovna;
 
 struct AppState {
     mesh_tx: broadcast::Sender<Vec<u8>>,
+    current_view: RwLock<Option<Vec<u8>>>,
     current_mesh: RwLock<Option<Vec<u8>>>,
+    current_blueprints: RwLock<Vec<Vec<u8>>>,
     current_field: RwLock<Option<Vec<u8>>>,
     current_circuit: RwLock<Option<Vec<u8>>>,
     current_nanovna: RwLock<Option<Vec<u8>>>,
@@ -56,7 +58,9 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         mesh_tx: mesh_tx.clone(),
+        current_view: RwLock::new(None),
         current_mesh: RwLock::new(None),
+        current_blueprints: RwLock::new(Vec::new()),
         current_field: RwLock::new(None),
         current_circuit: RwLock::new(None),
         current_nanovna: RwLock::new(None),
@@ -69,6 +73,8 @@ async fn main() -> Result<()> {
             let is_field = data.len() >= 5 && &data[0..5] == b"FIELD";
             let is_circuit = data.len() >= 8 && &data[0..8] == b"CIRCUIT\0";
             let is_nanovna = data.len() >= 8 && &data[0..8] == b"NANOVNA\0";
+            let is_view = data.len() >= 4 && &data[0..4] == b"VIEW";
+            let is_blueprint = data.len() >= 3 && &data[0..3] == b"BP_";
 
             if is_field {
                 *state_clone.current_field.write().await = Some(data.clone());
@@ -76,7 +82,14 @@ async fn main() -> Result<()> {
                 *state_clone.current_circuit.write().await = Some(data.clone());
             } else if is_nanovna {
                 *state_clone.current_nanovna.write().await = Some(data.clone());
+            } else if is_view {
+                *state_clone.current_view.write().await = Some(data.clone());
+                // Clear blueprints when new view comes (new mesh generation starting)
+                state_clone.current_blueprints.write().await.clear();
+            } else if is_blueprint {
+                state_clone.current_blueprints.write().await.push(data.clone());
             } else {
+                // Regular mesh data
                 *state_clone.current_mesh.write().await = Some(data.clone());
             }
             let _ = state_clone.mesh_tx.send(data);
@@ -1097,9 +1110,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.mesh_tx.subscribe();
 
+    // Send current view config if available
+    if let Some(view) = state.current_view.read().await.clone() {
+        let _ = sender.send(Message::Binary(view.into())).await;
+    }
+
     // Send current mesh if available
     if let Some(mesh) = state.current_mesh.read().await.clone() {
         let _ = sender.send(Message::Binary(mesh.into())).await;
+    }
+
+    // Send current blueprints if available
+    for blueprint in state.current_blueprints.read().await.iter() {
+        let _ = sender.send(Message::Binary(blueprint.clone().into())).await;
     }
 
     // Send current field if available

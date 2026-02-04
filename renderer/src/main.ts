@@ -1154,10 +1154,8 @@ function create_blueprint_lines(plane: string, edges: Float32Array, count: numbe
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
 
   const material = new THREE.LineBasicMaterial({
-    color: 0x00ffff,
+    color: 0xffffff,
     linewidth: 2,
-    transparent: true,
-    opacity: 0.8,
   });
 
   const lines = new THREE.LineSegments(geometry, material);

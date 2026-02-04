@@ -54,18 +54,80 @@ impl MeshData {
     /// Generate blueprint edges projected onto a plane
     /// plane: 0=XZ, 1=XY, 2=YZ
     pub fn generate_blueprint(&self, plane: u8) -> Vec<u8> {
-        // Extract all edges from triangles
-        let mut edges = Vec::new();
-        for tri in 0..(self.indices.len() / 3) {
+        use std::collections::HashMap;
+        
+        // Crease angle threshold (cosine of ~30 degrees = 0.866)
+        // Edges where adjacent faces differ by more than this are "feature edges"
+        const CREASE_THRESHOLD: f32 = 0.5; // ~60 degrees
+        
+        // Compute face normals for each triangle
+        let num_tris = self.indices.len() / 3;
+        let mut face_normals: Vec<[f32; 3]> = Vec::with_capacity(num_tris);
+        
+        for tri in 0..num_tris {
+            let i0 = self.indices[tri * 3] as usize;
+            let i1 = self.indices[tri * 3 + 1] as usize;
+            let i2 = self.indices[tri * 3 + 2] as usize;
+            
+            let p0 = [self.positions[i0 * 3], self.positions[i0 * 3 + 1], self.positions[i0 * 3 + 2]];
+            let p1 = [self.positions[i1 * 3], self.positions[i1 * 3 + 1], self.positions[i1 * 3 + 2]];
+            let p2 = [self.positions[i2 * 3], self.positions[i2 * 3 + 1], self.positions[i2 * 3 + 2]];
+            
+            // Edge vectors
+            let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            
+            // Cross product for normal
+            let n = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            
+            // Normalize
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-10 {
+                face_normals.push([n[0] / len, n[1] / len, n[2] / len]);
+            } else {
+                face_normals.push([0.0, 0.0, 1.0]);
+            }
+        }
+        
+        // Map each edge to the triangles that share it
+        let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for tri in 0..num_tris {
             let i0 = self.indices[tri * 3] as usize;
             let i1 = self.indices[tri * 3 + 1] as usize;
             let i2 = self.indices[tri * 3 + 2] as usize;
 
-            // Add three edges per triangle
-            edges.push((i0, i1));
-            edges.push((i1, i2));
-            edges.push((i2, i0));
+            // Normalize edge representation (smaller index first)
+            let e0 = if i0 < i1 { (i0, i1) } else { (i1, i0) };
+            let e1 = if i1 < i2 { (i1, i2) } else { (i2, i1) };
+            let e2 = if i2 < i0 { (i2, i0) } else { (i0, i2) };
+
+            edge_tris.entry(e0).or_insert_with(Vec::new).push(tri);
+            edge_tris.entry(e1).or_insert_with(Vec::new).push(tri);
+            edge_tris.entry(e2).or_insert_with(Vec::new).push(tri);
         }
+
+        // Keep edges that are: boundary (1 tri) OR crease (normals differ significantly)
+        let edges: Vec<(usize, usize)> = edge_tris
+            .into_iter()
+            .filter(|(_, tris)| {
+                if tris.len() == 1 {
+                    return true; // Boundary edge
+                }
+                if tris.len() == 2 {
+                    let n1 = face_normals[tris[0]];
+                    let n2 = face_normals[tris[1]];
+                    // Dot product of normals
+                    let dot = n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2];
+                    return dot < CREASE_THRESHOLD; // Crease edge if normals differ
+                }
+                false // Non-manifold edge (>2 tris)
+            })
+            .map(|(edge, _)| edge)
+            .collect();
 
         // Project edges onto the specified plane
         let mut projected = Vec::new();
