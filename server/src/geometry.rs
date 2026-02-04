@@ -429,33 +429,43 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
         }
         "external_thread" => {
             // ISO metric external thread (male thread)
-            // Class 6g: undersized from nominal for clearance
+            // Mirror of internal_thread but pointing OUTWARD
             let major_diameter: f64 = params.get("major_diameter")?;
             let pitch: f64 = params.get("pitch").unwrap_or(3.0);
             let height: f64 = params.get("height")?;
             let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
-            // Clearance for 3D printing (0.2mm recommended)
             let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
             
-            // ISO 68-1 thread geometry with clearance applied
+            // ISO 68-1 thread geometry
             let thread_depth = 0.54125 * pitch;
-            let major_radius = major_diameter / 2.0 - clearance;  // Crests move inward
-            let minor_radius = major_radius - thread_depth;       // Roots follow
+            let major_radius = major_diameter / 2.0 - clearance;
+            let minor_radius = major_radius - thread_depth;
             
+            // Create core cylinder with extension past height
+            // Core radius slightly larger than minor_radius for solid union overlap
+            let core_extension = pitch;
+            let core_overlap = thread_depth * 0.15; // 15% overlap into thread
+            let core = Manifold::new_cylinder(
+                pos(height + 2.0 * core_extension),
+                pos(minor_radius + core_overlap),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            ).translate(Vec3::new(0.0, 0.0, -core_extension));
+            
+            // Generate helical thread mesh pointing OUTWARD (minor to major)
+            // Same pattern as internal_thread but radii swapped
             let num_turns = height / pitch;
             let total_segments = ((num_turns + 1.0) * segments_per_turn as f64).ceil() as usize;
             let pi2 = 2.0 * std::f64::consts::PI;
             
-            // Thread profile: trapezoidal cross-section (approximating 60° V thread)
             let half_pitch = pitch / 2.0;
-            let thread_angle_factor = 0.577; // tan(30°) for 60° thread
-            let crest_half_width = thread_depth * thread_angle_factor * 0.5;
+            let thread_angle_factor = 0.577;
+            // Apply clearance to V-profile: narrower crest for male (gentle factor)
+            let crest_half_width = thread_depth * thread_angle_factor * 0.5 - clearance * 0.25;
             let root_half_width = half_pitch * 0.9;
             
-            // Generate vertices for closed helical solid
-            // Each segment has 4 profile points forming a quad
             let num_profile_pts = 4usize;
-            // No separate cap center vertices - caps are quad faces
             let num_verts = (total_segments + 1) * num_profile_pts;
             let mut vert_props: Vec<f32> = Vec::with_capacity(num_verts * 6);
             
@@ -467,10 +477,10 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
                 let cos_a = angle.cos();
                 let sin_a = angle.sin();
                 
-                // Profile quad in helical coords:
+                // Profile quad pointing OUTWARD (mirror of internal):
                 // 0: inner-bottom (minor radius, z - root_half_width)
-                // 1: outer-bottom (major radius, z - crest_half_width)  
-                // 2: outer-top (major radius, z + crest_half_width)
+                // 1: outer-bottom (major radius, z - crest_half_width) - thread crest (narrower)
+                // 2: outer-top (major radius, z + crest_half_width) - thread crest (narrower)
                 // 3: inner-top (minor radius, z + root_half_width)
                 
                 let z0 = z_center - root_half_width;
@@ -478,7 +488,7 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
                 let z2 = z_center + crest_half_width;
                 let z3 = z_center + root_half_width;
                 
-                let nx = cos_a as f32;
+                let nx = cos_a as f32; // normal pointing outward
                 let ny = sin_a as f32;
                 
                 vert_props.extend_from_slice(&[
@@ -499,37 +509,33 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
                 ]);
             }
             
-            // Generate triangles
+            // Generate triangles - SAME winding as internal_thread
             let mut tri_verts: Vec<u32> = Vec::new();
             
-            // Start cap: close the first quad profile (triangulate the quad)
-            // Quad vertices: 0, 1, 2, 3 → triangles (0,2,1), (0,3,2)
-            tri_verts.extend_from_slice(&[0, 2, 1]);
-            tri_verts.extend_from_slice(&[0, 3, 2]);
+            // Start cap
+            tri_verts.extend_from_slice(&[0, 1, 2]);
+            tri_verts.extend_from_slice(&[0, 2, 3]);
             
-            // Side faces connecting profile rings
+            // Side faces
             for seg in 0..total_segments {
                 let base = (seg * num_profile_pts) as u32;
                 let next = ((seg + 1) * num_profile_pts) as u32;
                 
                 for i in 0..num_profile_pts as u32 {
                     let next_i = (i + 1) % num_profile_pts as u32;
-                    // Quad face as two triangles
-                    tri_verts.extend_from_slice(&[base + i, base + next_i, next + next_i]);
-                    tri_verts.extend_from_slice(&[base + i, next + next_i, next + i]);
+                    tri_verts.extend_from_slice(&[base + i, next + next_i, base + next_i]);
+                    tri_verts.extend_from_slice(&[base + i, next + i, next + next_i]);
                 }
             }
             
-            // End cap: close the last quad profile
+            // End cap
             let last_ring = (total_segments * num_profile_pts) as u32;
-            // Quad vertices: last_ring+0, +1, +2, +3 → triangles with opposite winding
-            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 1, last_ring + 2]);
-            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 2, last_ring + 3]);
+            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 2, last_ring + 1]);
+            tri_verts.extend_from_slice(&[last_ring + 0, last_ring + 3, last_ring + 2]);
             
             let actual_verts = vert_props.len() / 6;
             let num_tris = tri_verts.len() / 3;
             
-            // Create manifold from mesh
             let thread_mesh: Manifold = unsafe {
                 let mesh_ptr = manifold_meshgl(
                     manifold_alloc_meshgl(),
@@ -543,21 +549,16 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
                 std::mem::transmute(manifold_ptr)
             };
             
-            // Create core cylinder with slight overlap into thread root for proper union
-            // The thread root is at minor_radius, so we extend core slightly beyond
-            let core_overlap = 0.05; // mm overlap to ensure solid merge
-            let core = Manifold::new_cylinder(
-                pos(height),
-                pos(minor_radius + core_overlap),
-                None::<PositiveF64>,
-                Some(PositiveI32::new(circular_segments as i32).unwrap()),
-                false,
-            );
+            // Check thread mesh
+            if let Some(err) = thread_mesh.last_operation_status() {
+                tracing::warn!("external_thread thread_mesh status: {:?}", err);
+            } else {
+                tracing::info!("external_thread thread_mesh: manifold OK");
+            }
             
-            // Union core with thread first, then trim - this ensures single solid
+            // Union core with thread, then trim
             let unioned = core.union(&thread_mesh);
             
-            // Trim to height bounds
             let bound = Manifold::new_cylinder(
                 pos(height),
                 pos(major_radius + 0.1),
@@ -568,6 +569,10 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             
             let result = unioned.intersection(&bound);
             
+            if let Some(err) = result.last_operation_status() {
+                tracing::warn!("external_thread result status: {:?}", err);
+            }
+            
             Ok(result)
         }
         "internal_thread" => {
@@ -577,32 +582,37 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             let pitch: f64 = params.get("pitch").unwrap_or(3.0);
             let height: f64 = params.get("height")?;
             let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            // Clearance for 3D printing - expands bore slightly for looser fit
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
             
-            // ISO 68-1 thread geometry (female stays at nominal)
+            // ISO 68-1 thread geometry
             let thread_depth = 0.54125 * pitch;
-            let major_radius = major_diameter / 2.0;  // Bore at nominal
-            let minor_radius = major_radius - thread_depth;  // Crests inward
+            let major_radius = major_diameter / 2.0 + clearance;  // Bore enlarged by clearance
+            let minor_radius = major_radius - thread_depth;  // Crests follow
             
             // Create outer cylinder (the tube wall)
-            let wall_thickness = thread_depth * 3.0;
+            let wall_thickness = thread_depth * 5.0; // thicker wall for stability
             let outer_radius = major_radius + wall_thickness;
             
+            // Extend tube past height bounds so trim cuts through solid
+            let tube_extension = pitch * 1.5; // extra extension for cleaner trim
             let outer = Manifold::new_cylinder(
-                pos(height),
+                pos(height + 2.0 * tube_extension),
                 pos(outer_radius),
                 None::<PositiveF64>,
                 Some(PositiveI32::new(circular_segments as i32).unwrap()),
                 false,
-            );
+            ).translate(Vec3::new(0.0, 0.0, -tube_extension));
             
-            // Create inner bore at MAJOR diameter (thread roots are at major)
+            // Create inner bore slightly smaller than MAJOR diameter for solid union overlap
+            let bore_overlap = thread_depth * 0.15; // 15% overlap into thread
             let inner_bore = Manifold::new_cylinder(
-                pos(height + 0.02),
-                pos(major_radius),
+                pos(height + 2.0 * tube_extension + 0.02),
+                pos(major_radius - bore_overlap),
                 None::<PositiveF64>,
                 Some(PositiveI32::new(circular_segments as i32).unwrap()),
                 false,
-            ).translate(Vec3::new(0.0, 0.0, -0.01));
+            ).translate(Vec3::new(0.0, 0.0, -tube_extension - 0.01));
             
             let tube = outer.difference(&inner_bore);
             
@@ -614,7 +624,8 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             // Thread profile for internal: points INWARD
             let half_pitch = pitch / 2.0;
             let thread_angle_factor = 0.577;
-            let crest_half_width = thread_depth * thread_angle_factor * 0.5;
+            // Apply clearance to V-profile: wider groove for female (gentle factor)
+            let crest_half_width = thread_depth * thread_angle_factor * 0.5 + clearance * 0.25;
             let root_half_width = half_pitch * 0.9;
             
             let num_profile_pts = 4usize;
@@ -704,6 +715,13 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             };
             
             // Union tube with untrimmed thread first for better merging
+            // Check if internal thread mesh is manifold
+            if let Some(err) = thread_mesh.last_operation_status() {
+                tracing::warn!("internal_thread thread_mesh status: {:?}", err);
+            } else {
+                tracing::info!("internal_thread thread_mesh: manifold OK");
+            }
+            
             let unioned = tube.union(&thread_mesh);
             
             // Trim to height bounds
@@ -727,6 +745,7 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
                 false,
             ).translate(Vec3::new(0.0, 0.0, -0.01));
             
+            // Return without cleanup cuts - the trim bounds should be sufficient
             Ok(trimmed.difference(&clear_bore))
         }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
