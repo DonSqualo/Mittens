@@ -16,6 +16,11 @@ const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
 camera.up.set(0, 0, 1); // Z is up
 camera.position.set(-80, -150, 80); // View from front-left, slightly above
 
+// Blueprint mode orthographic camera (will be sized to fit model bounds)
+let orthoCamera: THREE.OrthographicCamera | null = null;
+let blueprint_mode: string | null = null;
+const ALIGNMENT_THRESHOLD = 0.995; // ~5.7 degrees tolerance
+
 // Controls
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
@@ -50,6 +55,9 @@ controls.addEventListener('end', () => {
 
 // Track last Lua camera to avoid resetting on unchanged reloads
 let last_lua_camera_key: string | null = null;
+
+// Store home camera position (from Lua)
+let home_camera: { pos: [number, number, number], target: [number, number, number], fov: number } | null = null;
 
 // Current mesh and field visualizations
 let current_mesh: THREE.Mesh | null = null;
@@ -298,6 +306,123 @@ function value_to_color_plasma(t: number): THREE.Color {
 }
 
 type ColormapFn = (t: number) => THREE.Color;
+
+// Blueprint mode functions
+// Check if camera is aligned with one of the three principal planes
+function check_camera_alignment(): string | null {
+  if (!camera) return null;
+
+  // Get camera direction (looking direction)
+  const direction = new THREE.Vector3(0, 0, -1);
+  direction.applyQuaternion(camera.quaternion);
+  direction.normalize();
+
+  // Plane normals in Z-up system
+  const planes: Record<string, THREE.Vector3> = {
+    'XY': new THREE.Vector3(0, 0, 1),  // Normal along Z
+    'XZ': new THREE.Vector3(0, 1, 0),  // Normal along Y
+    'YZ': new THREE.Vector3(1, 0, 0),  // Normal along X
+  };
+
+  // Check dot product against each plane normal
+  for (const [name, normal] of Object.entries(planes)) {
+    const dot = Math.abs(direction.dot(normal));
+    if (dot >= ALIGNMENT_THRESHOLD) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+// Create orthographic camera sized to model bounds
+function create_ortho_camera(): THREE.OrthographicCamera {
+  const aspect = container.clientWidth / container.clientHeight;
+  // Placeholder frustum - will be updated in enter_blueprint_mode
+  const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 2000);
+  ortho.up.set(0, 0, 1);
+  return ortho;
+}
+
+// Update ortho camera frustum based on perspective camera's zoom level
+function update_ortho_frustum() {
+  if (!orthoCamera) return;
+  
+  // Calculate frustum size from perspective camera's distance and FOV
+  const distance = camera.position.distanceTo(controls.target);
+  const fovRad = THREE.MathUtils.degToRad(camera.fov);
+  const frustumHeight = 2 * distance * Math.tan(fovRad / 2);
+  const aspect = container.clientWidth / container.clientHeight;
+  
+  orthoCamera.left = -frustumHeight * aspect / 2;
+  orthoCamera.right = frustumHeight * aspect / 2;
+  orthoCamera.top = frustumHeight / 2;
+  orthoCamera.bottom = -frustumHeight / 2;
+  orthoCamera.updateProjectionMatrix();
+}
+
+// Enter blueprint mode for a specific plane
+function enter_blueprint_mode(plane: string) {
+  if (blueprint_mode === plane) return; // Already in this mode
+
+  console.log(`Entering blueprint mode: ${plane}`);
+  blueprint_mode = plane;
+
+  // Create ortho camera if not already created
+  if (!orthoCamera) {
+    orthoCamera = create_ortho_camera();
+  }
+
+  // Get current zoom distance for frustum sizing
+  const distance = camera.position.distanceTo(controls.target);
+  
+  // Snap ortho camera to clean axis-aligned position
+  orthoCamera.position.copy(controls.target);
+  
+  if (plane === 'XY') {
+    // Looking down Z axis at the XY plane
+    orthoCamera.position.z += distance;
+    orthoCamera.up.set(0, 1, 0);
+  } else if (plane === 'XZ') {
+    // Looking down Y axis at the XZ plane  
+    orthoCamera.position.y -= distance;
+    orthoCamera.up.set(0, 0, 1);
+  } else if (plane === 'YZ') {
+    // Looking down X axis at the YZ plane
+    orthoCamera.position.x += distance;
+    orthoCamera.up.set(0, 0, 1);
+  }
+  
+  orthoCamera.lookAt(controls.target);
+  update_ortho_frustum();
+
+  // Show blueprint indicator
+  update_blueprint_indicator(plane);
+}
+
+// Exit blueprint mode and return to perspective
+function exit_blueprint_mode() {
+  if (!blueprint_mode) return; // Not in blueprint mode
+
+  console.log('Exiting blueprint mode');
+  blueprint_mode = null;
+
+  // Clear blueprint indicator
+  update_blueprint_indicator(null);
+}
+
+// Update the blueprint mode indicator display
+function update_blueprint_indicator(plane: string | null) {
+  const indicator_el = document.getElementById('blueprint-indicator');
+  if (!indicator_el) return;
+
+  if (plane) {
+    indicator_el.textContent = `📐 ${plane} BLUEPRINT`;
+    indicator_el.style.visibility = 'visible';
+  } else {
+    indicator_el.style.visibility = 'hidden';
+  }
+}
 
 // Parse binary mesh
 function parse_binary_mesh(buffer: ArrayBuffer): { geometry: THREE.BufferGeometry, edges: number } | null {
@@ -961,6 +1086,9 @@ function update_mesh(buffer: ArrayBuffer) {
       const tgt_z = view.getFloat32(30, true);
       const fov = view.getFloat32(34, true);
 
+      // Store home camera position
+      home_camera = { pos: [cam_x, cam_y, cam_z], target: [tgt_x, tgt_y, tgt_z], fov };
+
       // Only apply Lua camera if it changed (preserves user manipulation)
       const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)}`;
       if (lua_key !== last_lua_camera_key) {
@@ -1164,12 +1292,18 @@ function connect_websocket() {
   };
 }
 
-// Resize
+// Resize - handle both perspective and orthographic cameras
 function resize() {
   const w = container.clientWidth;
   const h = container.clientHeight;
+  
+  // Update perspective camera
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+
+  // Update orthographic camera frustum if it exists
+  update_ortho_frustum();
+
   renderer.setSize(w, h);
 }
 resize();
@@ -1203,8 +1337,81 @@ function animate() {
   requestAnimationFrame(animate);
   controls.update();
   update_circuit_position();
-  renderer.render(scene, camera);
+
+  // Check camera alignment for blueprint mode
+  const aligned_plane = check_camera_alignment();
+  if (aligned_plane && !blueprint_mode) {
+    enter_blueprint_mode(aligned_plane);
+  } else if (!aligned_plane && blueprint_mode) {
+    exit_blueprint_mode();
+  } else if (aligned_plane && blueprint_mode && aligned_plane !== blueprint_mode) {
+    // Switched to a different plane
+    enter_blueprint_mode(aligned_plane);
+  }
+
+  // Use appropriate camera for rendering
+  const active_camera = blueprint_mode ? orthoCamera : camera;
+  renderer.render(scene, active_camera || camera);
 }
+
+// Default home camera
+const default_home = { pos: [42, -92, 52] as [number, number, number], target: [7, 9, 7] as [number, number, number], fov: 45 };
+
+// Home button - reset to Lua camera or default
+document.getElementById('home-btn')?.addEventListener('click', () => {
+  const home = home_camera || default_home;
+  camera.position.set(home.pos[0], home.pos[1], home.pos[2]);
+  controls.target.set(home.target[0], home.target[1], home.target[2]);
+  camera.fov = home.fov;
+  camera.updateProjectionMatrix();
+  controls.update();
+  localStorage.removeItem('mittens_camera');
+  update_camera_display();
+  console.log('Camera reset to home position');
+});
+
+// Camera position display
+const camera_info = document.getElementById('camera-info')!;
+const camera_pos_el = document.getElementById('camera-pos')!;
+const camera_target_el = document.getElementById('camera-target')!;
+
+function update_camera_display() {
+  const p = camera.position;
+  const t = controls.target;
+  camera_pos_el.textContent = `pos: [${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}]`;
+  camera_target_el.textContent = `target: [${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}]`;
+}
+
+camera_info.addEventListener('click', () => {
+  const p = camera.position;
+  const t = controls.target;
+  const config = `camera = {\n  position = {${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}},\n  target = {${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}},\n  fov = 45\n}`;
+  
+  // Use execCommand (works on HTTP, clipboard API needs HTTPS)
+  const textarea = document.createElement('textarea');
+  textarea.value = config;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand('copy');
+    camera_info.style.borderColor = '#0a8';
+    camera_info.style.background = 'rgba(0,100,80,0.3)';
+    setTimeout(() => {
+      camera_info.style.borderColor = '#444';
+      camera_info.style.background = 'rgba(0,0,0,0.8)';
+    }, 500);
+  } catch (e) {
+    console.log('Copy failed, config:', config);
+    alert(config);
+  }
+  document.body.removeChild(textarea);
+});
+
+// Update camera display on control changes
+controls.addEventListener('change', update_camera_display);
+update_camera_display();
 
 // Start
 connect_websocket();
