@@ -102,7 +102,11 @@ async fn main() -> Result<()> {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
+    let port: u16 = std::env::var("MITTENS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Server: http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
