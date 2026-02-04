@@ -1158,6 +1158,7 @@ function create_blueprint_lines(plane: string, edges: Float32Array, count: numbe
   });
 
   const lines = new THREE.LineSegments(geometry, material);
+  lines.visible = false; // Hidden by default, shown only in blueprint mode
   scene.add(lines);
   blueprint_edges.set(plane, lines);
 
