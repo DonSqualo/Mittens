@@ -105,6 +105,8 @@ function Threads.internal(params)
   local pitch = params.pitch
   local height = params.height or 5
   local segments_per_turn = params.segments_per_turn or 32
+  local clearance = params.clearance or 0
+  local wall_thickness = params.wall_thickness
   
   if not major_diameter or not pitch then
     error("internal_thread requires major_diameter and pitch")
@@ -119,6 +121,8 @@ function Threads.internal(params)
         pitch = pitch,
         height = height,
         segments_per_turn = segments_per_turn,
+        clearance = clearance,
+        wall_thickness = wall_thickness,
       }
     },
     _ops = {},
