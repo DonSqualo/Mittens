@@ -33,6 +33,7 @@ struct AppState {
     current_view: RwLock<Option<Vec<u8>>>,
     current_mesh: RwLock<Option<Vec<u8>>>,
     current_blueprints: RwLock<Vec<Vec<u8>>>,
+    current_dimensions: RwLock<Vec<Vec<u8>>>,
     current_field: RwLock<Option<Vec<u8>>>,
     current_circuit: RwLock<Option<Vec<u8>>>,
     current_nanovna: RwLock<Option<Vec<u8>>>,
@@ -61,6 +62,7 @@ async fn main() -> Result<()> {
         current_view: RwLock::new(None),
         current_mesh: RwLock::new(None),
         current_blueprints: RwLock::new(Vec::new()),
+        current_dimensions: RwLock::new(Vec::new()),
         current_field: RwLock::new(None),
         current_circuit: RwLock::new(None),
         current_nanovna: RwLock::new(None),
@@ -75,6 +77,7 @@ async fn main() -> Result<()> {
             let is_nanovna = data.len() >= 8 && &data[0..8] == b"NANOVNA\0";
             let is_view = data.len() >= 4 && &data[0..4] == b"VIEW";
             let is_blueprint = data.len() >= 3 && &data[0..3] == b"BP_";
+            let is_dimensions = data.len() >= 3 && &data[0..3] == b"DIM";
 
             if is_field {
                 *state_clone.current_field.write().await = Some(data.clone());
@@ -84,10 +87,13 @@ async fn main() -> Result<()> {
                 *state_clone.current_nanovna.write().await = Some(data.clone());
             } else if is_view {
                 *state_clone.current_view.write().await = Some(data.clone());
-                // Clear blueprints when new view comes (new mesh generation starting)
+                // Clear blueprints and dimensions when new view comes (new mesh generation starting)
                 state_clone.current_blueprints.write().await.clear();
+                state_clone.current_dimensions.write().await.clear();
             } else if is_blueprint {
                 state_clone.current_blueprints.write().await.push(data.clone());
+            } else if is_dimensions {
+                state_clone.current_dimensions.write().await.push(data.clone());
             } else {
                 // Regular mesh data
                 *state_clone.current_mesh.write().await = Some(data.clone());
@@ -205,6 +211,21 @@ fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mps
                         blueprint.len()
                     );
                     let _ = tx.send(blueprint);
+
+                    // Generate and send dimensions for this plane
+                    let dimensions = result.mesh.generate_dimensions(plane);
+                    let dim_count = if dimensions.len() > 12 {
+                        (dimensions.len() - 12) / 21  // 21 bytes per dimension: [4*f32 + f32 + u8 = 21]
+                    } else {
+                        0
+                    };
+                    info!(
+                        "Generated dimensions {}: {} dimensions, {} bytes",
+                        plane_names[plane as usize],
+                        dim_count,
+                        dimensions.len()
+                    );
+                    let _ = tx.send(dimensions);
                 }
             }
             Err(e) => error!("Lua error: {}", e),

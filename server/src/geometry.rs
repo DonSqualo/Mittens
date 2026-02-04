@@ -192,6 +192,177 @@ impl MeshData {
 
         data
     }
+
+    /// Generate dimension annotations for a projected plane
+    /// plane: 0=XZ, 1=XY, 2=YZ
+    /// Returns binary format:
+    /// - Header: "DIM_XZ\0\0" / "DIM_XY\0\0" / "DIM_YZ\0\0" (8 bytes)
+    /// - Count: u32
+    /// - Per dimension: [f32 x1, f32 y1, f32 x2, f32 y2, f32 value_mm, u8 type]
+    /// - Types: 0=horizontal, 1=vertical, 2=diagonal, 3=radius
+    pub fn generate_dimensions(&self, plane: u8) -> Vec<u8> {
+        // First, collect all projected edges to compute bounding box
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        let num_tris = self.indices.len() / 3;
+        let mut face_normals: Vec<[f32; 3]> = Vec::with_capacity(num_tris);
+        
+        // Compute face normals
+        for tri in 0..num_tris {
+            let i0 = self.indices[tri * 3] as usize;
+            let i1 = self.indices[tri * 3 + 1] as usize;
+            let i2 = self.indices[tri * 3 + 2] as usize;
+            
+            let p0 = [self.positions[i0 * 3], self.positions[i0 * 3 + 1], self.positions[i0 * 3 + 2]];
+            let p1 = [self.positions[i1 * 3], self.positions[i1 * 3 + 1], self.positions[i1 * 3 + 2]];
+            let p2 = [self.positions[i2 * 3], self.positions[i2 * 3 + 1], self.positions[i2 * 3 + 2]];
+            
+            let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            
+            let n = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-10 {
+                face_normals.push([n[0] / len, n[1] / len, n[2] / len]);
+            } else {
+                face_normals.push([0.0, 0.0, 1.0]);
+            }
+        }
+
+        // Build edge map and compute bounds
+        let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for tri in 0..num_tris {
+            let i0 = self.indices[tri * 3] as usize;
+            let i1 = self.indices[tri * 3 + 1] as usize;
+            let i2 = self.indices[tri * 3 + 2] as usize;
+
+            let e0 = if i0 < i1 { (i0, i1) } else { (i1, i0) };
+            let e1 = if i1 < i2 { (i1, i2) } else { (i2, i1) };
+            let e2 = if i2 < i0 { (i2, i0) } else { (i0, i2) };
+
+            edge_tris.entry(e0).or_insert_with(Vec::new).push(tri);
+            edge_tris.entry(e1).or_insert_with(Vec::new).push(tri);
+            edge_tris.entry(e2).or_insert_with(Vec::new).push(tri);
+        }
+
+        // Compute bounding box by projecting all vertices
+        for i in 0..(self.positions.len() / 3) {
+            let p = [
+                self.positions[i * 3],
+                self.positions[i * 3 + 1],
+                self.positions[i * 3 + 2],
+            ];
+
+            let (px, py) = match plane {
+                0 => (p[0], p[2]), // XZ
+                1 => (p[0], p[1]), // XY
+                2 => (p[1], p[2]), // YZ
+                _ => continue,
+            };
+
+            min_x = min_x.min(px);
+            max_x = max_x.max(px);
+            min_y = min_y.min(py);
+            max_y = max_y.max(py);
+        }
+
+        // Generate basic bounding box dimensions
+        let mut dimensions = Vec::new();
+
+        // Horizontal dimension (X)
+        let width = max_x - min_x;
+        if width.is_finite() && width > 0.1 {
+            dimensions.push(([min_x, min_y - 5.0, max_x, min_y - 5.0], width, 0u8)); // 0 = horizontal
+        }
+
+        // Vertical dimension (Y)
+        let height = max_y - min_y;
+        if height.is_finite() && height > 0.1 {
+            dimensions.push(([min_x - 5.0, min_y, min_x - 5.0, max_y], height, 1u8)); // 1 = vertical
+        }
+
+        // Try to detect circular features (radii)
+        // Look for edges that form circular patterns
+        let mut circular_radii: Vec<(f32, [f32; 2])> = Vec::new();
+        
+        for (i0, i1) in edge_tris.keys() {
+            if *i0 >= self.positions.len() / 3 || *i1 >= self.positions.len() / 3 {
+                continue;
+            }
+
+            let p0 = [
+                self.positions[i0 * 3],
+                self.positions[i0 * 3 + 1],
+                self.positions[i0 * 3 + 2],
+            ];
+            let p1 = [
+                self.positions[i1 * 3],
+                self.positions[i1 * 3 + 1],
+                self.positions[i1 * 3 + 2],
+            ];
+
+            // Compute edge length
+            let dx = p1[0] - p0[0];
+            let dy = p1[1] - p0[1];
+            let dz = p1[2] - p0[2];
+            let edge_len = (dx * dx + dy * dy + dz * dz).sqrt();
+
+            // For cylinder-like shapes, detect circular edges
+            // A circular edge in XY/XZ/YZ plane should be roughly constant distance from center
+            if edge_len > 0.1 && edge_len < 100.0 {
+                // Simple heuristic: edges forming circles have characteristic length
+                // For a circle with radius r, edge length ≈ 2*r*sin(angle/2)
+                // For many segments, average to radius
+                let approx_radius = edge_len * 0.5;
+                
+                let (px, py) = match plane {
+                    0 => (p0[0], p0[2]), // XZ
+                    1 => (p0[0], p0[1]), // XY
+                    2 => (p0[1], p0[2]), // YZ
+                    _ => continue,
+                };
+
+                circular_radii.push((approx_radius, [px, py]));
+            }
+        }
+
+        // Add one representative radius dimension
+        if !circular_radii.is_empty() {
+            let avg_radius = circular_radii.iter().map(|(r, _)| r).sum::<f32>() / circular_radii.len() as f32;
+            if avg_radius.is_finite() && avg_radius > 0.1 {
+                let cx = min_x + (max_x - min_x) * 0.5;
+                let cy = min_y + (max_y - min_y) * 0.5;
+                dimensions.push(([cx, cy, cx + avg_radius, cy], avg_radius, 3u8)); // 3 = radius
+            }
+        }
+
+        // Build binary message
+        let plane_names = ["DIM_XZ\0\0", "DIM_XY\0\0", "DIM_YZ\0\0"];
+        let header = plane_names[plane as usize];
+
+        let mut data = Vec::new();
+        data.extend_from_slice(header.as_bytes());
+        data.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
+
+        for (coords, value, dim_type) in dimensions {
+            data.extend_from_slice(&coords[0].to_le_bytes()); // x1
+            data.extend_from_slice(&coords[1].to_le_bytes()); // y1
+            data.extend_from_slice(&coords[2].to_le_bytes()); // x2
+            data.extend_from_slice(&coords[3].to_le_bytes()); // y2
+            data.extend_from_slice(&value.to_le_bytes()); // value
+            data.push(dim_type); // type
+        }
+
+        data
+    }
 }
 
 extern "C" {

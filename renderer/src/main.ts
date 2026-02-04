@@ -75,6 +75,11 @@ let probe_lines: THREE.Group | null = null;
 const blueprint_edges = new Map<string, THREE.LineSegments>();
 const blueprint_data = new Map<string, {edges: Float32Array, count: number}>();
 
+// Dimension annotations storage (per plane)
+const dimension_lines = new Map<string, THREE.LineSegments>();
+const dimension_labels = new Map<string, THREE.Sprite[]>();
+const dimension_data = new Map<string, {x1: number, y1: number, x2: number, y2: number, value: number, type: number}[]>();
+
 // Circuit overlay element and 3D anchor
 const circuit_overlay = document.getElementById('circuit-overlay')!;
 const circuit_anchor = new THREE.Vector3(0, 0, 60); // Anchor point above Z axis
@@ -415,12 +420,26 @@ function enter_blueprint_mode(plane: string, sign: number = 1) {
   orthoCamera.lookAt(controls.target);
   update_ortho_frustum();
 
-  // Show blueprint edges for this plane (if we have them)
+  // Show blueprint edges and dimensions for this plane (if we have them)
   let has_blueprint = false;
   for (const [bp_plane, lines] of blueprint_edges.entries()) {
     const show = (bp_plane === plane);
     lines.visible = show;
     if (show) has_blueprint = true;
+  }
+
+  // Show dimensions for this plane
+  for (const [dim_plane, lines] of dimension_lines.entries()) {
+    const show = (dim_plane === plane);
+    lines.visible = show;
+  }
+
+  // Show dimension labels for this plane
+  for (const [dim_plane, labels] of dimension_labels.entries()) {
+    const show = (dim_plane === plane);
+    labels.forEach(label => {
+      label.visible = show;
+    });
   }
 
   // Only hide mesh if we actually have blueprint data to show
@@ -442,6 +461,17 @@ function exit_blueprint_mode() {
   // Hide all blueprint edges
   for (const lines of blueprint_edges.values()) {
     lines.visible = false;
+  }
+
+  // Hide all dimensions and labels
+  for (const lines of dimension_lines.values()) {
+    lines.visible = false;
+  }
+
+  for (const labels of dimension_labels.values()) {
+    labels.forEach(label => {
+      label.visible = false;
+    });
   }
 
   // Show mesh again
@@ -1102,6 +1132,42 @@ function parse_blueprint_data(buffer: ArrayBuffer): { plane: string, edges: Floa
   return { plane, edges, count: num_edges };
 }
 
+// Parse dimension data
+function parse_dimension_data(buffer: ArrayBuffer): { plane: string, dimensions: {x1: number, y1: number, x2: number, y2: number, value: number, type: number}[] } | null {
+  const header = new Uint8Array(buffer, 0, 8);
+  const header_str = String.fromCharCode(...header);
+
+  let plane: string;
+  if (header_str.startsWith('DIM_XZ')) {
+    plane = 'XZ';
+  } else if (header_str.startsWith('DIM_XY')) {
+    plane = 'XY';
+  } else if (header_str.startsWith('DIM_YZ')) {
+    plane = 'YZ';
+  } else {
+    return null;
+  }
+
+  const view = new DataView(buffer);
+  const num_dimensions = view.getUint32(8, true);
+  const dimensions = [];
+
+  // Each dimension: [f32 x1, f32 y1, f32 x2, f32 y2, f32 value, u8 type] = 21 bytes
+  let offset = 12;
+  for (let i = 0; i < num_dimensions; i++) {
+    const x1 = view.getFloat32(offset, true); offset += 4;
+    const y1 = view.getFloat32(offset, true); offset += 4;
+    const x2 = view.getFloat32(offset, true); offset += 4;
+    const y2 = view.getFloat32(offset, true); offset += 4;
+    const value = view.getFloat32(offset, true); offset += 4;
+    const type = view.getUint8(offset); offset += 1;
+
+    dimensions.push({ x1, y1, x2, y2, value, type });
+  }
+
+  return { plane, dimensions };
+}
+
 // Parse circuit data
 function parse_circuit_data(buffer: ArrayBuffer) {
   const view = new DataView(buffer);
@@ -1176,6 +1242,115 @@ function create_blueprint_lines(plane: string, edges: Float32Array, count: numbe
   console.log(`Blueprint ${plane}: ${count} edges created`);
 }
 
+// Create dimension line visualizations with labels
+function create_dimension_lines(plane: string, dims: {x1: number, y1: number, x2: number, y2: number, value: number, type: number}[]) {
+  // Remove old dimensions for this plane if they exist
+  if (dimension_lines.has(plane)) {
+    const old_lines = dimension_lines.get(plane)!;
+    scene.remove(old_lines);
+    old_lines.geometry.dispose();
+    if (old_lines.material instanceof THREE.Material) {
+      old_lines.material.dispose();
+    }
+  }
+
+  // Remove old labels
+  if (dimension_labels.has(plane)) {
+    dimension_labels.get(plane)!.forEach(label => {
+      scene.remove(label);
+      if (label.material instanceof THREE.Material) {
+        label.material.dispose();
+      }
+      if (label.material instanceof THREE.SpriteMaterial && label.material.map) {
+        label.material.map.dispose();
+      }
+    });
+  }
+
+  const positions: number[] = [];
+  const labels: THREE.Sprite[] = [];
+
+  for (const dim of dims) {
+    const { x1, y1, x2, y2, value, type } = dim;
+
+    // Map 2D coordinates to 3D based on plane
+    let p1: THREE.Vector3, p2: THREE.Vector3;
+    if (plane === 'XY') {
+      p1 = new THREE.Vector3(x1, y1, 0);
+      p2 = new THREE.Vector3(x2, y2, 0);
+    } else if (plane === 'XZ') {
+      p1 = new THREE.Vector3(x1, 0, y1);
+      p2 = new THREE.Vector3(x2, 0, y2);
+    } else if (plane === 'YZ') {
+      p1 = new THREE.Vector3(0, x1, y1);
+      p2 = new THREE.Vector3(0, x2, y2);
+    } else {
+      continue;
+    }
+
+    // Add dimension line
+    positions.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+
+    // Create label with dimension value
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d')!;
+    
+    // Clear with transparency
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // White text, monospace
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 24px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Format value based on type
+    let text = '';
+    if (type === 3) { // Radius
+      text = `R${value.toFixed(1)}`;
+    } else {
+      text = `${value.toFixed(1)}`;
+    }
+
+    ctx.fillText(text, 64, 32);
+
+    // Create texture and sprite
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    const label = new THREE.Sprite(material);
+
+    // Position label at midpoint of dimension line
+    const midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+    label.position.copy(midpoint);
+    label.scale.set(20, 10, 1);
+    label.visible = false; // Hidden by default, shown only in blueprint mode
+
+    scene.add(label);
+    labels.push(label);
+  }
+
+  // Create geometry and lines
+  if (positions.length > 0) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+
+    const material = new THREE.LineBasicMaterial({
+      color: 0x00ffff,  // Cyan
+      linewidth: 2,
+    });
+
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.visible = false; // Hidden by default
+    scene.add(lines);
+    dimension_lines.set(plane, lines);
+  }
+
+  dimension_labels.set(plane, labels);
+  console.log(`Dimensions ${plane}: ${dims.length} dimensions created`);
+}
+
 // Display circuit as 2D overlay
 function display_circuit_overlay(circuit: { size: { width: number, height: number }, svg: string }) {
   circuit_overlay.innerHTML = circuit.svg;
@@ -1196,6 +1371,17 @@ function update_mesh(buffer: ArrayBuffer) {
     if (blueprint_result) {
       blueprint_data.set(blueprint_result.plane, { edges: blueprint_result.edges, count: blueprint_result.count });
       create_blueprint_lines(blueprint_result.plane, blueprint_result.edges, blueprint_result.count);
+    }
+    return;
+  }
+
+  // Handle dimension data
+  const header_3 = String.fromCharCode(...header.slice(0, 3));
+  if (header_3 === 'DIM') {
+    const dimension_result = parse_dimension_data(buffer);
+    if (dimension_result) {
+      dimension_data.set(dimension_result.plane, dimension_result.dimensions);
+      create_dimension_lines(dimension_result.plane, dimension_result.dimensions);
     }
     return;
   }
