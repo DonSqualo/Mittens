@@ -405,13 +405,16 @@ function enter_blueprint_mode(plane: string, sign: number = 1) {
   orthoCamera.lookAt(controls.target);
   update_ortho_frustum();
 
-  // Show blueprint edges for this plane
+  // Show blueprint edges for this plane (if we have them)
+  let has_blueprint = false;
   for (const [bp_plane, lines] of blueprint_edges.entries()) {
-    lines.visible = (bp_plane === plane);
+    const show = (bp_plane === plane);
+    lines.visible = show;
+    if (show) has_blueprint = true;
   }
 
-  // Hide mesh in blueprint mode
-  if (current_mesh) {
+  // Only hide mesh if we actually have blueprint data to show
+  if (current_mesh && has_blueprint) {
     current_mesh.visible = false;
   }
 
