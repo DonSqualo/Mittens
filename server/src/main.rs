@@ -145,10 +145,12 @@ struct CameraState {
     position: [f32; 3],
     target: [f32; 3],
     fov: f32,
+    near: f32,
+    far: f32,
 }
 
 fn serialize_view_config(flat_shading: bool, camera: Option<CameraState>) -> Vec<u8> {
-    let mut data = Vec::with_capacity(40);
+    let mut data = Vec::with_capacity(48);
     data.extend_from_slice(b"VIEW\0\0\0\0");
     data.push(if flat_shading { 1 } else { 0 });
 
@@ -162,6 +164,8 @@ fn serialize_view_config(flat_shading: bool, camera: Option<CameraState>) -> Vec
             data.extend_from_slice(&cam.target[1].to_le_bytes());
             data.extend_from_slice(&cam.target[2].to_le_bytes());
             data.extend_from_slice(&cam.fov.to_le_bytes());
+            data.extend_from_slice(&cam.near.to_le_bytes());
+            data.extend_from_slice(&cam.far.to_le_bytes());
         }
         None => {
             data.push(0); // has_camera = 0
@@ -1059,6 +1063,8 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                 let pos: Option<mlua::Table> = cam_table.get("position").ok();
                 let tgt: Option<mlua::Table> = cam_table.get("target").ok();
                 let fov: Option<f32> = cam_table.get("fov").ok();
+                let near: f32 = cam_table.get("near").unwrap_or(0.1);
+                let far: f32 = cam_table.get("far").unwrap_or(10000.0);
 
                 if let (Some(pos_t), Some(tgt_t), Some(fov_v)) = (pos, tgt, fov) {
                     let position = [
@@ -1071,7 +1077,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                         tgt_t.get::<_, f32>(2).unwrap_or(0.0),
                         tgt_t.get::<_, f32>(3).unwrap_or(0.0),
                     ];
-                    Some(CameraState { position, target, fov: fov_v })
+                    Some(CameraState { position, target, fov: fov_v, near, far })
                 } else {
                     None
                 }

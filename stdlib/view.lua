@@ -239,6 +239,8 @@ function View.serialize()
       position = View._state.camera.position,
       target = View._state.camera.target,
       fov = View._state.camera.fov,
+      near = View._state.camera.near,
+      far = View._state.camera.far,
     },
   }
 end

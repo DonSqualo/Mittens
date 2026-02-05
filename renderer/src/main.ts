@@ -967,7 +967,7 @@ function update_mesh(buffer: ArrayBuffer) {
     flat_shading = view.getUint8(8) === 1;
     const has_camera = view.getUint8(9) === 1;
 
-    if (has_camera && buffer.byteLength >= 38) {
+    if (has_camera && buffer.byteLength >= 46) {
       const cam_x = view.getFloat32(10, true);
       const cam_y = view.getFloat32(14, true);
       const cam_z = view.getFloat32(18, true);
@@ -975,22 +975,26 @@ function update_mesh(buffer: ArrayBuffer) {
       const tgt_y = view.getFloat32(26, true);
       const tgt_z = view.getFloat32(30, true);
       const fov = view.getFloat32(34, true);
+      const near = view.getFloat32(38, true);
+      const far = view.getFloat32(42, true);
 
       // Store as home camera position
       home_camera = { pos: [cam_x, cam_y, cam_z], target: [tgt_x, tgt_y, tgt_z], fov };
 
       // Only apply Lua camera if it changed (preserves user manipulation)
-      const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)}`;
+      const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)},${near.toFixed(2)},${far.toFixed(0)}`;
       if (lua_key !== last_lua_camera_key) {
         camera.position.set(cam_x, cam_y, cam_z);
         controls.target.set(tgt_x, tgt_y, tgt_z);
         camera.fov = fov;
+        camera.near = near;
+        camera.far = far;
         camera.updateProjectionMatrix();
         controls.update();
         last_lua_camera_key = lua_key;
         // Clear localStorage when Lua explicitly sets camera
         localStorage.removeItem('mittens_camera');
-        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}`);
+        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}, near=${near}, far=${far}`);
       } else {
         console.log(`View config: flat_shading=${flat_shading}, camera unchanged (keeping user position)`);
       }
