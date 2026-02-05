@@ -1,9 +1,9 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/victor/',
+  base: process.env.VITE_BASE_PATH || '/',
   server: {
-    port: 3002,
+    port: parseInt(process.env.VITE_PORT || '3000'),
     open: false,
   },
   build: {
