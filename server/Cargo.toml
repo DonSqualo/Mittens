@@ -1,8 +1,8 @@
 [package]
-name = "scriptcad-server"
+name = "mittens-server"
 version = "0.1.0"
 edition = "2021"
-description = "Development server for ScriptCAD with file watching and Lua execution"
+description = "Development server for Mittens CAD with file watching and Lua execution"
 
 [dependencies]
 # Web server
