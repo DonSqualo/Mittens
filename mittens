@@ -14,11 +14,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$SCRIPT_DIR/server"
 RENDERER_DIR="$SCRIPT_DIR/renderer"
 
-# Defaults
+# Defaults (can be overridden by --instance)
+INSTANCE=""
 LUA_FILE=""
-SERVER_PORT=3001
-RENDERER_PORT=3000
-BASE_PATH="/"
+SERVER_PORT=""
+RENDERER_PORT=""
+BASE_PATH=""
 REBUILD=false
 RESTART=false
 
@@ -45,23 +46,64 @@ ${BOLD}Usage:${NC} mittens -f <file.lua> [options]
 
 ${BOLD}Options:${NC}
   -f, --file <path>       Lua file to load (required)
-  -s, --server <port>     Server WebSocket port (default: 3001)
-  -r, --renderer <port>   Renderer port (default: 3000)
-  -b, --base <path>       Base URL path for renderer (default: /)
+  -i, --instance <name>   Instance name (heim|victor) - sets default ports/paths
+  -s, --server <port>     Server WebSocket port (default: 3001, or per-instance)
+  -r, --renderer <port>   Renderer port (default: 3000, or per-instance)
+  -b, --base <path>       Base URL path for renderer (default: /, or per-instance)
       --rebuild           Force rebuild server with cargo
       --restart           Force stop existing processes on ports
   -h, --help              Show this help
 
+${BOLD}Instances:${NC}
+  heim   - Renderer: 3000, Server: 3001, Base: /
+  victor - Renderer: 3002, Server: 3003, Base: /victor
+
 ${BOLD}Examples:${NC}
   mittens -f examples/basic/cube.lua
-  mittens -f ~/projects/design.lua -s 4001 -r 4000
-  mittens -f test.lua --rebuild --restart
+  mittens -f ~/projects/design.lua --instance heim
+  mittens -f test.lua --instance victor --restart
 
 ${BOLD}Requirements:${NC}
   - Rust/Cargo (for server)
   - Node.js/npm (for renderer)
 EOF
     exit 0
+}
+
+# Apply instance defaults
+apply_instance_defaults() {
+    case "$INSTANCE" in
+        heim)
+            [[ -z "$SERVER_PORT" ]] && SERVER_PORT=3001
+            [[ -z "$RENDERER_PORT" ]] && RENDERER_PORT=3000
+            [[ -z "$BASE_PATH" ]] && BASE_PATH="/"
+            ;;
+        victor)
+            [[ -z "$SERVER_PORT" ]] && SERVER_PORT=3003
+            [[ -z "$RENDERER_PORT" ]] && RENDERER_PORT=3002
+            [[ -z "$BASE_PATH" ]] && BASE_PATH="/victor"
+            ;;
+        "")
+            # No instance specified - use generic defaults
+            [[ -z "$SERVER_PORT" ]] && SERVER_PORT=3001
+            [[ -z "$RENDERER_PORT" ]] && RENDERER_PORT=3000
+            [[ -z "$BASE_PATH" ]] && BASE_PATH="/"
+            ;;
+        *)
+            error "Unknown instance: $INSTANCE (valid: heim, victor)"
+            ;;
+    esac
+}
+
+# Get pm2 process names for this instance
+get_pm2_names() {
+    if [[ -n "$INSTANCE" ]]; then
+        PM2_SERVER="${INSTANCE}-mittens-server"
+        PM2_RENDERER="${INSTANCE}-mittens-renderer"
+    else
+        PM2_SERVER="mittens-server"
+        PM2_RENDERER="mittens-renderer"
+    fi
 }
 
 # Check if a command exists
@@ -99,10 +141,9 @@ stop_processes() {
     if [[ "$RESTART" == true ]]; then
         log "Stopping existing processes..."
         
-        # Try pm2 first (if available and processes exist)
+        # Try pm2 first - ONLY kill this instance's processes
         if has_cmd pm2; then
-            pm2 delete "mittens-server" "mittens-renderer" \
-                "private-mittens-server" "private-mittens-renderer" 2>/dev/null || true
+            pm2 delete "$PM2_SERVER" "$PM2_RENDERER" 2>/dev/null || true
         fi
         
         # Kill anything on our ports
@@ -124,6 +165,7 @@ stop_processes() {
 while [[ $# -gt 0 ]]; do
     case $1 in
         -f|--file)     LUA_FILE="$2"; shift 2 ;;
+        -i|--instance) INSTANCE="$2"; shift 2 ;;
         -s|--server)   SERVER_PORT="$2"; shift 2 ;;
         -r|--renderer) RENDERER_PORT="$2"; shift 2 ;;
         -b|--base)     BASE_PATH="$2"; shift 2 ;;
@@ -137,6 +179,10 @@ while [[ $# -gt 0 ]]; do
             shift ;;
     esac
 done
+
+# Apply instance defaults AFTER parsing (so explicit flags override)
+apply_instance_defaults
+get_pm2_names
 
 # Validate Lua file
 [[ -z "$LUA_FILE" ]] && error "No Lua file specified. Use: mittens -f <file.lua>"
@@ -198,7 +244,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Start server
-log "Starting server..."
+log "Starting server (instance: ${INSTANCE:-default})..."
 cd "$SERVER_DIR"
 "$SERVER_BIN" "$LUA_FILE" 2>&1 | while IFS= read -r line; do
     if [[ "$line" == *"ERROR"* ]] || [[ "$line" == *"error"* ]]; then
@@ -246,6 +292,7 @@ done
 # Print summary
 echo ""
 echo -e "${BOLD}Mittens running!${NC}"
+[[ -n "$INSTANCE" ]] && echo -e "  ${BLUE}Instance:${NC}  $INSTANCE"
 echo ""
 echo -e "  ${GREEN}Renderer:${NC}  http://localhost:$RENDERER_PORT$BASE_PATH"
 echo -e "  ${GREEN}WebSocket:${NC} ws://localhost:$SERVER_PORT/ws"
