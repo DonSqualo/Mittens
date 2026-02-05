@@ -1,15 +1,11 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  base: '/victor/',
   server: {
-    port: 3000,
-    open: true,
-    proxy: {
-      '/ws': {
-        target: 'ws://localhost:3001',
-        ws: true,
-      },
-    },
+    port: 3002,
+    host: '0.0.0.0',
+    open: false,
   },
   build: {
     target: 'esnext',
