@@ -11,7 +11,7 @@ View._state = {
     up = {0, 0, 1},
     fov = 45,
     near = 0.1,
-    far = 10000,
+    far = 100000,  -- 100m default, handles large assemblies
     projection = "perspective",  -- perspective, orthographic
   },
   visible = {},
@@ -262,7 +262,7 @@ function View.reset()
       up = {0, 0, 1},
       fov = 45,
       near = 0.1,
-      far = 10000,
+      far = 100000,
       projection = "perspective",
     },
     visible = {},
