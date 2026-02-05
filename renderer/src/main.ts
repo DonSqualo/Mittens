@@ -1205,11 +1205,20 @@ function connect_websocket() {
       last_update_time = new Date();
       update_status_display();
     } else if (typeof event.data === 'string') {
-      // JSON message - could be labels or other metadata
+      // JSON message - could be labels, info, or other metadata
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'labels' && Array.isArray(msg.labels)) {
           update_labels(msg.labels);
+        } else if (msg.type === 'info') {
+          const server_info_el = document.getElementById('server-info');
+          if (server_info_el) {
+            const file = msg.file || 'unknown';
+            const branch = msg.branch || 'unknown';
+            // Show just filename, not full path
+            const filename = file.split('/').pop() || file;
+            server_info_el.textContent = `${filename} · ${branch}`;
+          }
         }
       } catch (e) {
         console.warn('Failed to parse JSON message:', e);

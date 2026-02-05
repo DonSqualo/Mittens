@@ -36,6 +36,8 @@ struct AppState {
     current_circuit: RwLock<Option<Vec<u8>>>,
     current_nanovna: RwLock<Option<Vec<u8>>>,
     current_labels: RwLock<Option<String>>,
+    watched_file: String,
+    git_branch: String,
 }
 
 #[tokio::main]
@@ -46,6 +48,16 @@ async fn main() -> Result<()> {
     let file_path = PathBuf::from(file_path);
 
     info!("Watching: {:?}", file_path);
+
+    // Get git branch
+    let git_branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    info!("Git branch: {}", git_branch);
 
     let (mesh_tx, _) = broadcast::channel::<Vec<u8>>(16);
     let (labels_tx, _) = broadcast::channel::<String>(16);
@@ -67,6 +79,8 @@ async fn main() -> Result<()> {
         current_circuit: RwLock::new(None),
         current_nanovna: RwLock::new(None),
         current_labels: RwLock::new(None),
+        watched_file: file_path.display().to_string(),
+        git_branch,
     });
 
     // Handle mesh/field/circuit/nanovna results
@@ -1142,6 +1156,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.mesh_tx.subscribe();
     let mut labels_rx = state.labels_tx.subscribe();
+
+    // Send server info (file + branch)
+    let info_json = serde_json::json!({
+        "type": "info",
+        "file": state.watched_file,
+        "branch": state.git_branch
+    });
+    let _ = sender.send(Message::Text(info_json.to_string())).await;
 
     // Send current mesh if available
     if let Some(mesh) = state.current_mesh.read().await.clone() {
