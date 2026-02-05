@@ -1303,7 +1303,14 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 
 // WebSocket
 function connect_websocket() {
+<<<<<<< HEAD
   const ws = new WebSocket(`ws://${window.location.host}/ws`);
+=======
+  // Use path-based WebSocket routing through nginx
+  const basePath = import.meta.env.BASE_URL || '/';
+  const wsPath = basePath.endsWith('/') ? `${basePath}ws` : `${basePath}/ws`;
+  const ws = new WebSocket(`ws://${window.location.host}${wsPath}`);
+>>>>>>> f6f9b6e (fix: WebSocket path for non-root base paths (/victor/ws not /victorws))
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
