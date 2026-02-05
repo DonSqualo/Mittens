@@ -27,3 +27,5 @@ test-results/
 node_modules/
 screenshots/
 *.stl
+ecosystem.config.js
+mittens
