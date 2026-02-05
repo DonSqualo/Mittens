@@ -1586,7 +1586,7 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 function connect_websocket() {
   // Use path-based WebSocket routing through nginx
   const basePath = import.meta.env.BASE_URL || '/';
-  const wsPath = basePath === '/' ? '/ws' : `${basePath}ws`;
+  const wsPath = basePath.endsWith('/') ? `${basePath}ws` : `${basePath}/ws`;
   const ws = new WebSocket(`ws://${window.location.host}${wsPath}`);
   ws.binaryType = 'arraybuffer';
 
