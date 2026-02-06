@@ -1236,12 +1236,6 @@ function connect_websocket() {
             port: msg.port || 0
           };
           update_status('connected');
-          
-          // Also update the separate server-info element (can be removed later)
-          const server_info_el = document.getElementById('server-info');
-          if (server_info_el) {
-            server_info_el.style.display = 'none';  // Hide old element
-          }
         }
       } catch (e) {
         console.warn('Failed to parse JSON message:', e);
