@@ -1169,11 +1169,16 @@ let last_render_ms = 0;
 let server_info: { file: string; branch: string; port: number } | null = null;
 
 function format_time(date: Date): string {
-  return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
 }
 
 function update_status_display() {
-  if (last_update_time) {
+  if (last_update_time && server_info) {
+    const filename = server_info.file.split('/').pop() || server_info.file;
+    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port} · ${format_time(last_update_time)}`;
+    status_el.style.color = '#0f0';
+    status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
+  } else if (last_update_time) {
     status_el.textContent = `Updated ${format_time(last_update_time)}`;
     status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
   }
