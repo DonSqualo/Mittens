@@ -1064,7 +1064,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                 let tgt: Option<mlua::Table> = cam_table.get("target").ok();
                 let fov: Option<f32> = cam_table.get("fov").ok();
                 let near: f32 = cam_table.get("near").unwrap_or(0.1);
-                let far: f32 = cam_table.get("far").unwrap_or(10000.0);
+                let far: f32 = cam_table.get("far").unwrap_or(100000.0);
 
                 if let (Some(pos_t), Some(tgt_t), Some(fov_v)) = (pos, tgt, fov) {
                     let position = [

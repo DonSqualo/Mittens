@@ -13,7 +13,7 @@ renderer.setClearColor(0x000000, 1);
 const scene = new THREE.Scene();
 
 // Camera (Z-up coordinate system)
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
 camera.up.set(0, 0, 1); // Z is up
 
 // Default camera position (home view)
@@ -60,7 +60,7 @@ controls.addEventListener('end', () => {
 let last_lua_camera_key: string | null = null;
 
 // Store home camera position (from Lua, or default)
-let home_camera: { pos: [number, number, number], target: [number, number, number], fov: number } | null = null;
+let home_camera: { pos: [number, number, number], target: [number, number, number], fov: number, near: number, far: number } | null = null;
 
 // Current mesh and field visualizations
 let current_mesh: THREE.Mesh | null = null;
@@ -978,8 +978,10 @@ function update_mesh(buffer: ArrayBuffer) {
       const near = view.getFloat32(38, true);
       const far = view.getFloat32(42, true);
 
-      // Store as home camera position
-      home_camera = { pos: [cam_x, cam_y, cam_z], target: [tgt_x, tgt_y, tgt_z], fov };
+      console.log(`[VIEW] Received: near=${near}, far=${far}, fov=${fov}`);
+
+      // Store as home camera position (including near/far for clipping)
+      home_camera = { pos: [cam_x, cam_y, cam_z], target: [tgt_x, tgt_y, tgt_z], fov, near, far };
 
       // Only apply Lua camera if it changed (preserves user manipulation)
       const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)},${near.toFixed(2)},${far.toFixed(0)}`;
@@ -1367,10 +1369,14 @@ function reset_camera() {
     camera.position.set(home_camera.pos[0], home_camera.pos[1], home_camera.pos[2]);
     controls.target.set(home_camera.target[0], home_camera.target[1], home_camera.target[2]);
     camera.fov = home_camera.fov;
+    camera.near = home_camera.near;
+    camera.far = home_camera.far;
   } else {
     camera.position.copy(DEFAULT_CAMERA.position);
     controls.target.copy(DEFAULT_CAMERA.target);
     camera.fov = DEFAULT_CAMERA.fov;
+    camera.near = 0.1;
+    camera.far = 100000;
   }
   camera.updateProjectionMatrix();
   controls.update();
