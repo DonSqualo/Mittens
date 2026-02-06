@@ -38,6 +38,7 @@ struct AppState {
     current_labels: RwLock<Option<String>>,
     watched_file: String,
     git_branch: String,
+    port: u16,
 }
 
 #[tokio::main]
@@ -58,6 +59,12 @@ async fn main() -> Result<()> {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     info!("Git branch: {}", git_branch);
+
+    // Get port early so we can include it in AppState
+    let port: u16 = std::env::var("MITTENS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001);
 
     let (mesh_tx, _) = broadcast::channel::<Vec<u8>>(16);
     let (labels_tx, _) = broadcast::channel::<String>(16);
@@ -81,6 +88,7 @@ async fn main() -> Result<()> {
         current_labels: RwLock::new(None),
         watched_file: file_path.display().to_string(),
         git_branch,
+        port,
     });
 
     // Handle mesh/field/circuit/nanovna results
@@ -132,7 +140,7 @@ async fn main() -> Result<()> {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Server: http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1163,11 +1171,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.mesh_tx.subscribe();
     let mut labels_rx = state.labels_tx.subscribe();
 
-    // Send server info (file + branch)
+    // Send server info (file + branch + port)
     let info_json = serde_json::json!({
         "type": "info",
         "file": state.watched_file,
-        "branch": state.git_branch
+        "branch": state.git_branch,
+        "port": state.port
     });
     let _ = sender.send(Message::Text(info_json.to_string())).await;
 

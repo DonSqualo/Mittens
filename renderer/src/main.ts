@@ -1165,6 +1165,9 @@ let last_update_time: Date | null = null;
 let last_edge_count = 0;
 let last_render_ms = 0;
 
+// Server info (file, branch, port)
+let server_info: { file: string; branch: string; port: number } | null = null;
+
 function format_time(date: Date): string {
   return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
@@ -1183,8 +1186,14 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
     disconnected: '🔴',
     error: '❌',
   };
-  if (state !== 'connected' || !last_update_time) {
+  if (state === 'connected' && server_info) {
+    // Show file · branch · :port in green
+    const filename = server_info.file.split('/').pop() || server_info.file;
+    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port}`;
+    status_el.style.color = '#0f0';
+  } else if (state !== 'connected' || !last_update_time) {
     status_el.textContent = `${icons[state]} ${state.toUpperCase()}`;
+    status_el.style.color = '';  // Reset to default
     if (detail) {
       status_detail_el.textContent = detail;
     }
@@ -1220,13 +1229,18 @@ function connect_websocket() {
         if (msg.type === 'labels' && Array.isArray(msg.labels)) {
           update_labels(msg.labels);
         } else if (msg.type === 'info') {
+          // Store server info and update status display
+          server_info = {
+            file: msg.file || 'unknown',
+            branch: msg.branch || 'unknown',
+            port: msg.port || 0
+          };
+          update_status('connected');
+          
+          // Also update the separate server-info element (can be removed later)
           const server_info_el = document.getElementById('server-info');
           if (server_info_el) {
-            const file = msg.file || 'unknown';
-            const branch = msg.branch || 'unknown';
-            // Show just filename, not full path
-            const filename = file.split('/').pop() || file;
-            server_info_el.textContent = `${filename} · ${branch}`;
+            server_info_el.style.display = 'none';  // Hide old element
           }
         }
       } catch (e) {
