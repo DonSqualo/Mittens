@@ -14,13 +14,20 @@ const scene = new THREE.Scene();
 // Camera (Z-up coordinate system)
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
 camera.up.set(0, 0, 1); // Z is up
-camera.position.set(-80, -150, 80); // View from front-left, slightly above
+
+// Default camera position (home view)
+const DEFAULT_CAMERA = {
+  position: new THREE.Vector3(-80, -150, 80),
+  target: new THREE.Vector3(0, 0, 20),
+  fov: 45
+};
+camera.position.copy(DEFAULT_CAMERA.position);
 
 // Controls
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
-controls.target.set(0, 0, 20); // Look at slightly above origin
+controls.target.copy(DEFAULT_CAMERA.target);
 
 // Restore camera from localStorage (survives page reloads)
 const saved_camera = localStorage.getItem('mittens_camera');
@@ -50,6 +57,9 @@ controls.addEventListener('end', () => {
 
 // Track last Lua camera to avoid resetting on unchanged reloads
 let last_lua_camera_key: string | null = null;
+
+// Store home camera position (from Lua, or default)
+let home_camera: { pos: [number, number, number], target: [number, number, number], fov: number } | null = null;
 
 // Current mesh and field visualizations
 let current_mesh: THREE.Mesh | null = null;
@@ -961,6 +971,9 @@ function update_mesh(buffer: ArrayBuffer) {
       const tgt_z = view.getFloat32(30, true);
       const fov = view.getFloat32(34, true);
 
+      // Store as home camera position
+      home_camera = { pos: [cam_x, cam_y, cam_z], target: [tgt_x, tgt_y, tgt_z], fov };
+
       // Only apply Lua camera if it changed (preserves user manipulation)
       const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)}`;
       if (lua_key !== last_lua_camera_key) {
@@ -1202,6 +1215,114 @@ function animate() {
   update_circuit_position();
   renderer.render(scene, camera);
 }
+
+// Camera position display
+const camera_info = document.getElementById('camera-info')!;
+const camera_pos_el = document.getElementById('camera-pos')!;
+const camera_target_el = document.getElementById('camera-target')!;
+
+function update_camera_display() {
+  const p = camera.position;
+  const t = controls.target;
+  camera_pos_el.textContent = `[${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}]`;
+  camera_target_el.textContent = `[${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}]`;
+}
+
+camera_info.addEventListener('click', () => {
+  const p = camera.position;
+  const t = controls.target;
+  const config = `camera = {
+  position = {${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}},
+  target = {${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}},
+  up = {0, 0, 1}
+}`;
+
+  function showSuccess() {
+    camera_info.style.color = '#0a8';
+    setTimeout(() => camera_info.style.color = '', 500);
+  }
+  
+  function showFailure() {
+    camera_info.style.color = '#a00';
+    setTimeout(() => camera_info.style.color = '', 500);
+    console.warn('Clipboard copy failed');
+  }
+
+  // Mobile-friendly fallback copy
+  function fallbackCopy(text: string): boolean {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    // iOS requires the element to be visible and in viewport
+    textarea.style.position = 'fixed';
+    textarea.style.left = '0';
+    textarea.style.top = '0';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    // iOS Safari needs setSelectionRange
+    textarea.setSelectionRange(0, text.length);
+    let success = false;
+    try {
+      success = document.execCommand('copy');
+    } catch (e) {
+      console.warn('execCommand copy failed:', e);
+    }
+    document.body.removeChild(textarea);
+    return success;
+  }
+
+  // Try modern API first, then fallback
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(config).then(showSuccess).catch(() => {
+      if (fallbackCopy(config)) showSuccess();
+      else showFailure();
+    });
+  } else {
+    if (fallbackCopy(config)) showSuccess();
+    else showFailure();
+  }
+});
+
+// Update camera display on control changes
+controls.addEventListener('change', update_camera_display);
+update_camera_display();
+
+// Home button - reset camera to Lua home or default
+const home_btn = document.getElementById('home-btn');
+function reset_camera() {
+  // Use Lua-defined camera as home, or fall back to default
+  if (home_camera) {
+    camera.position.set(home_camera.pos[0], home_camera.pos[1], home_camera.pos[2]);
+    controls.target.set(home_camera.target[0], home_camera.target[1], home_camera.target[2]);
+    camera.fov = home_camera.fov;
+  } else {
+    camera.position.copy(DEFAULT_CAMERA.position);
+    controls.target.copy(DEFAULT_CAMERA.target);
+    camera.fov = DEFAULT_CAMERA.fov;
+  }
+  camera.updateProjectionMatrix();
+  controls.update();
+  localStorage.removeItem('mittens_camera');
+  update_camera_display();
+  console.log('Camera reset to home position');
+  // Visual feedback
+  if (home_btn) {
+    home_btn.style.color = '#0a8';
+    setTimeout(() => home_btn.style.color = '', 300);
+  }
+}
+
+home_btn?.addEventListener('click', reset_camera);
+
+// Keyboard shortcut: H for home
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'h' || e.key === 'H') {
+    // Don't trigger if typing in an input
+    if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+    reset_camera();
+  }
+});
 
 // Start
 connect_websocket();
