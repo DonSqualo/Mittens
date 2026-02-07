@@ -30,10 +30,12 @@ mod nanovna;
 
 struct AppState {
     mesh_tx: broadcast::Sender<Vec<u8>>,
+    labels_tx: broadcast::Sender<String>,
     current_mesh: RwLock<Option<Vec<u8>>>,
     current_field: RwLock<Option<Vec<u8>>>,
     current_circuit: RwLock<Option<Vec<u8>>>,
     current_nanovna: RwLock<Option<Vec<u8>>>,
+    current_labels: RwLock<Option<String>>,
 }
 
 #[tokio::main]
@@ -46,20 +48,25 @@ async fn main() -> Result<()> {
     info!("Watching: {:?}", file_path);
 
     let (mesh_tx, _) = broadcast::channel::<Vec<u8>>(16);
+    let (labels_tx, _) = broadcast::channel::<String>(16);
     let (lua_tx, lua_rx) = mpsc::unbounded_channel::<(String, PathBuf)>();
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (labels_result_tx, mut labels_result_rx) = mpsc::unbounded_channel::<String>();
 
     // Lua processing thread (Manifold needs to run on same thread)
+    let labels_tx_clone = labels_result_tx.clone();
     thread::spawn(move || {
-        process_lua_files(lua_rx, result_tx);
+        process_lua_files(lua_rx, result_tx, labels_tx_clone);
     });
 
     let state = Arc::new(AppState {
         mesh_tx: mesh_tx.clone(),
+        labels_tx: labels_tx.clone(),
         current_mesh: RwLock::new(None),
         current_field: RwLock::new(None),
         current_circuit: RwLock::new(None),
         current_nanovna: RwLock::new(None),
+        current_labels: RwLock::new(None),
     });
 
     // Handle mesh/field/circuit/nanovna results
@@ -80,6 +87,15 @@ async fn main() -> Result<()> {
                 *state_clone.current_mesh.write().await = Some(data.clone());
             }
             let _ = state_clone.mesh_tx.send(data);
+        }
+    });
+
+    // Handle labels results
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        while let Some(labels_json) = labels_result_rx.recv().await {
+            *state_clone.current_labels.write().await = Some(labels_json.clone());
+            let _ = state_clone.labels_tx.send(labels_json);
         }
     });
 
@@ -141,7 +157,7 @@ fn serialize_view_config(flat_shading: bool, camera: Option<CameraState>) -> Vec
     data
 }
 
-fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mpsc::UnboundedSender<Vec<u8>>) {
+fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mpsc::UnboundedSender<Vec<u8>>, labels_tx: mpsc::UnboundedSender<String>) {
     let lua = mlua::Lua::new();
 
     // Set up package path to include stdlib directory
@@ -176,6 +192,17 @@ fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mps
                     result.flat_shading
                 );
                 let _ = tx.send(binary);
+
+                // Send labels as JSON if any
+                if !result.labels.is_empty() {
+                    let labels_json = serde_json::json!({
+                        "type": "labels",
+                        "labels": result.labels
+                    });
+                    if let Ok(json_str) = serde_json::to_string(&labels_json) {
+                        let _ = labels_tx.send(json_str);
+                    }
+                }
             }
             Err(e) => error!("Lua error: {}", e),
         }
@@ -986,6 +1013,17 @@ struct ProcessResult {
     #[allow(dead_code)]
     circular_segments: u32,
     camera: Option<CameraState>,
+    labels: Vec<Label>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct Label {
+    text: String,
+    x: f32,
+    y: f32,
+    z: f32,
+    size: f32,
+    color: String,
 }
 
 fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Path) -> Result<ProcessResult> {
@@ -1042,7 +1080,31 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         export::process_exports_from_table(lua, table, base_dir);
     }
 
-    Ok(ProcessResult { mesh, flat_shading, circular_segments, camera })
+    // Extract labels
+    let labels = if let Some(table) = result.as_table() {
+        if let Ok(labels_table) = table.get::<_, mlua::Table>("labels") {
+            let mut labels = Vec::new();
+            for pair in labels_table.pairs::<i32, mlua::Table>() {
+                if let Ok((_, label)) = pair {
+                    let text: String = label.get("text").unwrap_or_default();
+                    let x: f32 = label.get("x").unwrap_or(0.0);
+                    let y: f32 = label.get("y").unwrap_or(0.0);
+                    let z: f32 = label.get("z").unwrap_or(0.0);
+                    let size: f32 = label.get("size").unwrap_or(5.0);
+                    let color: String = label.get("color").unwrap_or_else(|_| "#ffffff".to_string());
+                    labels.push(Label { text, x, y, z, size, color });
+                }
+            }
+            info!("Extracted {} labels", labels.len());
+            labels
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok(ProcessResult { mesh, flat_shading, circular_segments, camera, labels })
 }
 
 async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>) {
@@ -1079,6 +1141,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.mesh_tx.subscribe();
+    let mut labels_rx = state.labels_tx.subscribe();
 
     // Send current mesh if available
     if let Some(mesh) = state.current_mesh.read().await.clone() {
@@ -1100,10 +1163,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let _ = sender.send(Message::Binary(nanovna.into())).await;
     }
 
+    // Send current labels if available
+    if let Some(labels) = state.current_labels.read().await.clone() {
+        let _ = sender.send(Message::Text(labels)).await;
+    }
+
     loop {
         tokio::select! {
             Ok(mesh) = rx.recv() => {
                 if sender.send(Message::Binary(mesh.into())).await.is_err() {
+                    break;
+                }
+            }
+            Ok(labels) = labels_rx.recv() => {
+                if sender.send(Message::Text(labels)).await.is_err() {
                     break;
                 }
             }

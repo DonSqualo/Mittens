@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Text } from 'troika-three-text';
 
 // Setup
 const canvas = document.getElementById('main-canvas') as HTMLCanvasElement;
@@ -66,6 +67,10 @@ let current_mesh: THREE.Mesh | null = null;
 let arrows_group: THREE.Group | null = null;
 let field_plane: THREE.Mesh | null = null;
 let flat_shading: boolean = true;
+
+// 3D text labels (troika-three-text)
+let labels_group: THREE.Group = new THREE.Group();
+scene.add(labels_group);
 
 // Measurement markers (GaussMeter, Hydrophone)
 let measurement_markers: THREE.Group | null = null;
@@ -1107,6 +1112,46 @@ function update_mesh(buffer: ArrayBuffer) {
   scene.add(current_mesh);
 }
 
+// Update 3D text labels
+interface Label {
+  text: string;
+  x: number;
+  y: number;
+  z: number;
+  size?: number;
+  color?: string;
+}
+
+function update_labels(labels: Label[]) {
+  // Clear existing labels
+  while (labels_group.children.length > 0) {
+    const child = labels_group.children[0];
+    if ((child as any).dispose) (child as any).dispose();
+    labels_group.remove(child);
+  }
+
+  // Create new labels
+  for (const label of labels) {
+    const text = new Text();
+    text.text = label.text;
+    text.fontSize = label.size || 5;
+    text.color = label.color || 0xffffff;
+    text.anchorX = 'center';
+    text.anchorY = 'middle';
+    
+    // Position (Mittens uses Z-up, troika uses Y-up by default)
+    text.position.set(label.x, label.y, label.z);
+    
+    // Rotate to lie on XZ plane, readable looking from -Y toward +Y
+    text.rotation.x = Math.PI / 2;  // Flip to face -Y direction
+    
+    text.sync();
+    labels_group.add(text);
+  }
+  
+  console.log(`Updated ${labels.length} text labels`);
+}
+
 // Status HUD (no GPU needed)
 const status_el = document.getElementById('status')!;
 const status_detail_el = document.getElementById('status-detail')!;
@@ -1159,6 +1204,16 @@ function connect_websocket() {
       last_render_ms = performance.now() - start;
       last_update_time = new Date();
       update_status_display();
+    } else if (typeof event.data === 'string') {
+      // JSON message - could be labels or other metadata
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'labels' && Array.isArray(msg.labels)) {
+          update_labels(msg.labels);
+        }
+      } catch (e) {
+        console.warn('Failed to parse JSON message:', e);
+      }
     }
   };
 

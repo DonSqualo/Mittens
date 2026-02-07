@@ -192,6 +192,7 @@ fn pos(v: f64) -> PositiveF64 {
 }
 
 fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segments: u32) -> Result<Manifold> {
+    tracing::debug!("build_manifold_primitive: obj_type='{}', circular_segments={}", obj_type, circular_segments);
     match obj_type {
         "cylinder" => {
             let r: f64 = params.get("r")?;
@@ -302,8 +303,117 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
 
             Ok(outer.difference(&inner))
         }
+        "text" => {
+            let text_str: String = params.get("text")?;
+            let font_size: f64 = params.get("size")?;
+            
+            // Generate text mesh
+            generate_text_mesh(&text_str, font_size)
+        }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }
+}
+
+fn generate_text_mesh(text: &str, font_size: f64) -> Result<Manifold> {
+    // Simple monospace font: each character is a 6x10 grid of unit squares
+    // We'll create thin rectangles (extrusion in Y) for each character
+    
+    let char_width = font_size * 0.6;
+    let char_height = font_size;
+    let extrusion_thickness = 0.5; // Slight 3D extrusion in Y direction
+    
+    let mut vert_props: Vec<f32> = Vec::new();
+    let mut tri_verts: Vec<u32> = Vec::new();
+    let mut vertex_count = 0u32;
+    
+    // Simple character rasterization: for each character, draw a filled rectangle
+    for (char_idx, ch) in text.chars().enumerate() {
+        let x_offset = (char_idx as f64) * char_width;
+        
+        // Skip whitespace by rendering as empty space
+        if ch == ' ' {
+            continue;
+        }
+        
+        // Create a rectangle for the character
+        // Vertices for front face (Y=0)
+        let positions = vec![
+            (x_offset, 0.0, 0.0),                    // 0: front-bottom-left
+            (x_offset + char_width, 0.0, 0.0),       // 1: front-bottom-right
+            (x_offset + char_width, 0.0, char_height), // 2: front-top-right
+            (x_offset, 0.0, char_height),            // 3: front-top-left
+            // Vertices for back face (Y=extrusion_thickness)
+            (x_offset, extrusion_thickness, 0.0),                    // 4: back-bottom-left
+            (x_offset + char_width, extrusion_thickness, 0.0),       // 5: back-bottom-right
+            (x_offset + char_width, extrusion_thickness, char_height), // 6: back-top-right
+            (x_offset, extrusion_thickness, char_height),            // 7: back-top-left
+        ];
+        
+        // Add vertices to the list (with dummy normals that will be computed later)
+        for (px, py, pz) in positions {
+            vert_props.extend_from_slice(&[px as f32, py as f32, pz as f32, 0.0, 0.0, 1.0]);
+        }
+        
+        // Add triangles for the 6 faces of the box
+        let base = vertex_count;
+        
+        // Front face (Y=0)
+        tri_verts.extend_from_slice(&[base, base+1, base+2]);
+        tri_verts.extend_from_slice(&[base, base+2, base+3]);
+        
+        // Back face (Y=thickness)
+        tri_verts.extend_from_slice(&[base+4, base+6, base+5]);
+        tri_verts.extend_from_slice(&[base+4, base+7, base+6]);
+        
+        // Top face (Z=height)
+        tri_verts.extend_from_slice(&[base+3, base+2, base+6]);
+        tri_verts.extend_from_slice(&[base+3, base+6, base+7]);
+        
+        // Bottom face (Z=0)
+        tri_verts.extend_from_slice(&[base, base+5, base+1]);
+        tri_verts.extend_from_slice(&[base, base+4, base+5]);
+        
+        // Left face (X=x_offset)
+        tri_verts.extend_from_slice(&[base, base+3, base+7]);
+        tri_verts.extend_from_slice(&[base, base+7, base+4]);
+        
+        // Right face (X=x_offset+char_width)
+        tri_verts.extend_from_slice(&[base+1, base+5, base+6]);
+        tri_verts.extend_from_slice(&[base+1, base+6, base+2]);
+        
+        vertex_count += 8;
+    }
+    
+    if vert_props.is_empty() {
+        // Return empty/minimal geometry if no text (all spaces)
+        // Create a tiny dummy box to avoid invalid manifold
+        let tiny = Manifold::new_cuboid(
+            pos(0.01),
+            pos(0.01),
+            pos(0.01),
+            false,
+        );
+        return Ok(tiny);
+    }
+    
+    let num_verts = vertex_count as usize;
+    let num_tris = tri_verts.len() / 3;
+    
+    // Create manifold from mesh
+    let text_mesh: Manifold = unsafe {
+        let mesh_ptr = manifold_meshgl(
+            manifold_alloc_meshgl(),
+            vert_props.as_ptr(),
+            num_verts,
+            6,
+            tri_verts.as_ptr(),
+            num_tris,
+        );
+        let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+        std::mem::transmute(manifold_ptr)
+    };
+    
+    Ok(text_mesh)
 }
 
 fn apply_manifold_ops(manifold: Manifold, table: &mlua::Table) -> Result<Manifold> {
@@ -499,6 +609,7 @@ fn build_mesh_recursive_with_components(
     components: &HashMap<String, mlua::Table>,
 ) -> Result<MeshData> {
     let obj_type: String = table.get("type")?;
+    tracing::debug!("build_mesh_recursive_with_components: obj_type='{}'", obj_type);
 
     if obj_type == "group" || obj_type == "assembly" || obj_type == "component" {
         // Groups, assemblies, and components all union their children
