@@ -102,7 +102,7 @@ RightCoil = {}
 RightCoil.body = difference(
   cylinder(Coil.outer_radius, Coil.width),
   cylinder(Coil.inner_radius, Coil.width + 1)
-):centered():rotate(0, 90, 0):at(Coil.right_x, 0, 0):material(copper)
+):center("XYZ"):rotate(0, 90, 0):at(Coil.right_x, 0, 0):material(copper)
 
 -- ===========================
 -- Geometry: Left Coil
@@ -112,7 +112,7 @@ LeftCoil = {}
 LeftCoil.body = difference(
   cylinder(Coil.outer_radius, Coil.width),
   cylinder(Coil.inner_radius, Coil.width + 1)
-):centered():rotate(0, 90, 0):at(Coil.left_x, 0, 0):material(copper)
+):center("XYZ"):rotate(0, 90, 0):at(Coil.left_x, 0, 0):material(copper)
 
 -- ===========================
 -- Geometry: Bridge Gap Resonator
@@ -123,7 +123,7 @@ ResonatorTube.body = difference(
   cylinder(Resonator.outer_radius, Resonator.height),
   cylinder(Resonator.inner_radius, Resonator.height + 1),
   box(Resonator.gap, Resonator.wall * 2, Resonator.height):center(true, false, false):at(0, -Resonator.outer_radius)
-):centered():material(copper)
+):center("XYZ"):material(copper)
 
 ResonatorTube.gap_dielectric = box(Resonator.gap, Resonator.wall, Resonator.height)
     :center(true, false, true):at(0, -Resonator.outer_radius, 0):material(ptfe)
@@ -140,7 +140,7 @@ Bridge.body = difference(
   box(Bridge.outer_radius, Bridge.outer_radius * 2, Resonator.height):center(false, true, false):at(
     -(Bridge.outer_radius + Bridge.width / 2), 0, 0),
   box(Bridge.outer_radius * 2, Bridge.outer_radius, Resonator.height):center(true, false, false)
-):centered():material(copper)
+):center("XYZ"):material(copper)
 
 Bridge.dielectric = difference(
   cylinder(Resonator.outer_radius + Bridge.distance, Resonator.height),
@@ -150,7 +150,7 @@ Bridge.dielectric = difference(
   box(Bridge.outer_radius, Bridge.outer_radius * 2, Resonator.height):center(false, true, false):at(
     -(Bridge.outer_radius + Bridge.width / 2), 0, 0),
   box(Bridge.outer_radius * 2, Bridge.outer_radius, Resonator.height):center(true, false, false)
-):centered():material(ptfe)
+):center("XYZ"):material(ptfe)
 
 -- ===========================
 -- Geometry: Coupling Coil
@@ -170,33 +170,33 @@ CouplingCoil.body = ring(CouplingCoil.inner_radius, CouplingCoil.outer_radius, C
 local tube_half_length = Scaffold.tube_length / 2
 
 local scaffold_tube = difference(
-  cylinder(Scaffold.tube_radius, Scaffold.tube_length):centered():rotate(0, 90, 0),
-  cylinder(Scaffold.axial_hole_radius, Scaffold.tube_length + 2):centered():rotate(0, 90, 0)
+  cylinder(Scaffold.tube_radius, Scaffold.tube_length):center("XYZ"):rotate(0, 90, 0),
+  cylinder(Scaffold.axial_hole_radius, Scaffold.tube_length + 2):center("XYZ"):rotate(0, 90, 0)
 )
 
 local stopper_length = Coil.width + 2 * Scaffold.stopper_width
 local coil_cutout_scale = 1.02
 
 local coil_cutout_right = difference(
-  cylinder(Coil.outer_radius, Coil.width):centered(),
-  cylinder(Coil.inner_radius, Coil.width + 1):centered()
+  cylinder(Coil.outer_radius, Coil.width):center("XYZ"),
+  cylinder(Coil.inner_radius, Coil.width + 1):center("XYZ")
 ):scale(coil_cutout_scale):rotate(0, 90, 0):at(Coil.right_x, 0, 0)
 
 local coil_cutout_left = difference(
-  cylinder(Coil.outer_radius, Coil.width):centered(),
-  cylinder(Coil.inner_radius, Coil.width + 1):centered()
+  cylinder(Coil.outer_radius, Coil.width):center("XYZ"),
+  cylinder(Coil.inner_radius, Coil.width + 1):center("XYZ")
 ):scale(coil_cutout_scale):rotate(0, 90, 0):at(Coil.left_x, 0, 0)
 
 local stopper_right_base = difference(
-  cylinder(Scaffold.stopper_radius, stopper_length):centered(),
-  cylinder(Scaffold.tube_radius, stopper_length + 1):centered()
+  cylinder(Scaffold.stopper_radius, stopper_length):center("XYZ"),
+  cylinder(Scaffold.tube_radius, stopper_length + 1):center("XYZ")
 ):rotate(0, 90, 0):at(Coil.right_x, 0, 0)
 
 local stopper_right = difference(stopper_right_base, coil_cutout_right)
 
 local stopper_left_base = difference(
-  cylinder(Scaffold.stopper_radius, stopper_length):centered(),
-  cylinder(Scaffold.tube_radius, stopper_length + 1):centered()
+  cylinder(Scaffold.stopper_radius, stopper_length):center("XYZ"),
+  cylinder(Scaffold.tube_radius, stopper_length + 1):center("XYZ")
 ):rotate(0, 90, 0):at(Coil.left_x, 0, 0)
 
 local stopper_left = difference(stopper_left_base, coil_cutout_left)
@@ -205,7 +205,7 @@ local resonator_box = box(Coil.gap, Scaffold.box_length, Scaffold.box_height * 2
     :center(true, true, true)
 
 local resonator_cutout = cylinder(Resonator.outer_radius + Scaffold.clearance, Scaffold.box_height * 2 + 2)
-    :centered()
+    :center("XYZ")
 
 local bridge_cutout = box(
   Bridge.width + 2 * Scaffold.bridge_clearance,
@@ -217,7 +217,7 @@ Scaffold.body = difference(
   union(scaffold_tube, stopper_right, stopper_left, resonator_box),
   resonator_cutout,
   bridge_cutout,
-  cylinder(Scaffold.axial_hole_radius, Scaffold.tube_length + 2):centered():rotate(0, 90, 0)
+  cylinder(Scaffold.axial_hole_radius, Scaffold.tube_length + 2):center("XYZ"):rotate(0, 90, 0)
 ):color(0.15, 0.15, 0.15, 1.0):material(dark_pla)
 
 -- ===========================

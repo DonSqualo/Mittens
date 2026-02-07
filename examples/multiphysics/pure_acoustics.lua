@@ -149,12 +149,12 @@ local icd_assembly = group("icd_assembly", {
 -- ============================================================================
 
 Microscope.model = difference(
-      box(Microscope.length, Microscope.width, Microscope.height):centerXY(),
-      box(Microscope.WellPlate.length, Microscope.WellPlate.width, Microscope.height):centerXY():at(0, 0,
+      box(Microscope.length, Microscope.width, Microscope.height):center("XY"),
+      box(Microscope.WellPlate.length, Microscope.WellPlate.width, Microscope.height):center("XY"):at(0, 0,
         Microscope.height - Microscope.WellPlate.offset),
       box(Microscope.WellPlate.length - Microscope.WellPlate.offset,
         Microscope.WellPlate.width - Microscope.WellPlate.offset,
-        Microscope.height):centerXY()
+        Microscope.height):center("XY")
     )
     :at(0, 0, -Microscope.height)
     :material(material("steel"))
@@ -162,7 +162,7 @@ Microscope.model = difference(
 
 
 HolderAdapter.model = difference(
-      box(HolderAdapter.length, HolderAdapter.width, HolderAdapter.height):centerXY(),
+      box(HolderAdapter.length, HolderAdapter.width, HolderAdapter.height):center("XY"),
       cylinder(MetalBase.outer_diameter / 2, HolderAdapter.height):at(0, 0, HolderAdapter.offset),
       cylinder(MetalBase.inner_diameter / 2, HolderAdapter.height)
     )
