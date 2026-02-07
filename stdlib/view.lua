@@ -11,7 +11,7 @@ View._state = {
     up = {0, 0, 1},
     fov = 45,
     near = 0.1,
-    far = 10000,
+    far = 100000,  -- 100m default, handles large assemblies
     projection = "perspective",  -- perspective, orthographic
   },
   visible = {},
@@ -239,6 +239,8 @@ function View.serialize()
       position = View._state.camera.position,
       target = View._state.camera.target,
       fov = View._state.camera.fov,
+      near = View._state.camera.near,
+      far = View._state.camera.far,
     },
   }
 end
@@ -260,7 +262,7 @@ function View.reset()
       up = {0, 0, 1},
       fov = 45,
       near = 0.1,
-      far = 10000,
+      far = 100000,
       projection = "perspective",
     },
     visible = {},

@@ -110,7 +110,7 @@ local function oval(r, w, h)
   return union(
     cylinder(r, h):at(w, 0, 0),
     cylinder(r, h):at(-w, 0, 0),
-    box(2 * w, 2 * r, h):centerXY():at(0, 0, h / 2)
+    box(2 * w, 2 * r, h):center("XY"):at(0, 0, h / 2)
   )
 end
 
@@ -129,7 +129,7 @@ for i = 0, Magnet.count_inner - 1 do
   local is_rotated = (i % 2 == 1)
   local rotation = is_rotated and 45 or 0
   table.insert(inner_magnet_cutouts,
-    box(Magnet.size, Magnet.size, Ring.height + 1):centered()
+    box(Magnet.size, Magnet.size, Ring.height + 1):center("XYZ")
     :rotate(0, 0, rotation)
     :at(Ring.cutout_radius, 0, Ring.height / 2)
     :rotate(0, 0, angle)
@@ -142,7 +142,7 @@ for i = 0, Magnet.count_inner - 1 do
   local is_rotated = (i % 2 == 1)
   local rotation = is_rotated and 45 or 0
   table.insert(inner_slot_cutouts,
-    box(Magnet.size / 2, Magnet.size + 2, Ring.cutout_height):centered()
+    box(Magnet.size / 2, Magnet.size + 2, Ring.cutout_height):center("XYZ")
     :rotate(0, 0, rotation)
     :at(Ring.cutout_radius, 0, Ring.height - Ring.cutout_height / 2)
     :rotate(0, 0, angle)
@@ -185,7 +185,7 @@ for i = 0, Magnet.count_outer - 1 do
   local angle = i * (360 / Magnet.count_outer)
   local rotation = (i % 3 == 0) and 0 or ((i % 3 == 1) and 30 or -30)
   table.insert(outer_magnet_cutouts,
-    box(Magnet.size, Magnet.size, Ring.height + 1):centered()
+    box(Magnet.size, Magnet.size, Ring.height + 1):center("XYZ")
     :rotate(0, 0, rotation)
     :at(Ring.outer_cutout_radius, 0, Ring.height / 2)
     :rotate(0, 0, angle)
@@ -197,7 +197,7 @@ for i = 0, Magnet.count_outer - 1 do
   local angle = i * (360 / Magnet.count_outer)
   local rotation = (i % 3 == 0) and 0 or ((i % 3 == 1) and 30 or -30)
   table.insert(outer_slot_cutouts,
-    box(Magnet.size / 2, Magnet.size + 2, Ring.cutout_height * 2):centered()
+    box(Magnet.size / 2, Magnet.size + 2, Ring.cutout_height * 2):center("XYZ")
     :rotate(0, 0, rotation)
     :at(Ring.outer_cutout_radius, 0, Ring.height - Ring.cutout_height / 2)
     :rotate(0, 0, angle)
@@ -228,7 +228,7 @@ for i = 0, Magnet.count_inner - 1 do
   local x = Ring.cutout_radius * math.cos(angle_rad)
   local y = Ring.cutout_radius * math.sin(angle_rad)
   table.insert(cap_inner_magnets,
-    box(Magnet.size, Magnet.size, Ring.cutout_height):centered()
+    box(Magnet.size, Magnet.size, Ring.cutout_height):center("XYZ")
     :rotate(0, 0, rotation + angle_deg)
     :at(x, y, Ring.height - Ring.cutout_height / 2)
   )
@@ -243,7 +243,7 @@ for i = 0, Magnet.count_inner - 1 do
   local x = Ring.cutout_radius * math.cos(angle_rad)
   local y = Ring.cutout_radius * math.sin(angle_rad)
   table.insert(cap_inner_slots,
-    box(Magnet.size / 2, Magnet.size + 2 - Config.gap, Ring.cutout_height):centered()
+    box(Magnet.size / 2, Magnet.size + 2 - Config.gap, Ring.cutout_height):center("XYZ")
     :rotate(0, 0, rotation + angle_deg)
     :at(x, y, Ring.height - Ring.cutout_height / 2)
   )
@@ -287,7 +287,7 @@ for i = 0, Magnet.count_outer - 1 do
   local y = Ring.outer_cutout_radius * math.sin(angle_rad)
   table.insert(cap_outer_slots,
     box(Magnet.size / 2 - Config.tolerance, Magnet.size + 2 - Config.tolerance, Ring.cutout_height - Config.tolerance)
-    :centered()
+    :center("XYZ")
     :rotate(0, 0, rotation + angle_deg)
     :at(x, y, Ring.height - Ring.cutout_height / 2 + Config.tolerance)
   )
@@ -352,7 +352,7 @@ local setter_slots = {}
 for i = 0, Setter.count * 2 - 1 do
   local angle = -5 + Setter.angle * i
   table.insert(setter_slots,
-    box(Setter.width * 2, Setter.width / 3, Setter.height * 4):centered()
+    box(Setter.width * 2, Setter.width / 3, Setter.height * 4):center("XYZ")
     :at(0, 0, i * Setter.offset)
     :rotate(0, 0, angle)
   )
@@ -387,7 +387,7 @@ local deep_setter_slots = {}
 for i = 0, Setter.count * 2 - 1 do
   local angle = -5 + Setter.angle * i
   table.insert(deep_setter_slots,
-    box(Setter.width * 2, Setter.width / 3, Setter.height * 4):centered()
+    box(Setter.width * 2, Setter.width / 3, Setter.height * 4):center("XYZ")
     :at(0, 0, i * Setter.offset)
     :rotate(0, 0, angle)
   )
@@ -427,7 +427,7 @@ local trans_setter_bars = {}
 for i = 0, Setter.count - 1 do
   local angle = Setter.angle * i
   table.insert(trans_setter_bars,
-    box(Setter.width * 2, Setter.width / 4, Setter.height):centered()
+    box(Setter.width * 2, Setter.width / 4, Setter.height):center("XYZ")
     :at(0, 0, i * Setter.offset)
     :rotate(0, 0, angle)
   )
@@ -455,10 +455,10 @@ end
 MotorHolder.model = difference(
   box(Motor.width + 2 * Motor.wall, Motor.width + 2 * Motor.wall, Motor.height + Motor.insert_height):center(true, true,
     true),
-  box(Motor.width, Motor.width, Motor.height):centered():at(0, 0, -Motor.insert_height),
+  box(Motor.width, Motor.width, Motor.height):center("XYZ"):at(0, 0, -Motor.insert_height),
   motor_screw_holes,
   oval(Motor.axle_radius, 2, 2 * Motor.height):at(1, 0, 0),
-  box(Motor.width, Motor.width, Motor.height):centered():at(Motor.width / 2, 0, -Motor.insert_height)
+  box(Motor.width, Motor.width, Motor.height):center("XYZ"):at(Motor.width / 2, 0, -Motor.insert_height)
 )
 
 -- ===========================
@@ -484,9 +484,9 @@ MagnetInsertHelper = {}
 MagnetInsertHelper.model = difference(
   union(
     cylinder(Ring.outer_radius, Cap.height),
-    box(Magnet.size / 2, Magnet.size + 1.8, Ring.cutout_height):centered():at(0, 0, -Ring.cutout_height / 2)
+    box(Magnet.size / 2, Magnet.size + 1.8, Ring.cutout_height):center("XYZ"):at(0, 0, -Ring.cutout_height / 2)
   ),
-  box(Magnet.size, Magnet.size, Ring.height + 1):centered()
+  box(Magnet.size, Magnet.size, Ring.height + 1):center("XYZ")
 )
 
 -- ===========================
@@ -553,12 +553,12 @@ Microscope.width = Microscope.WellPlate.width + 20
 Microscope.WellPlate.offset = Microscope.height - 2
 
 Microscope.model = difference(
-  box(Microscope.length, Microscope.width, Microscope.height):centerXY(),
-  box(Microscope.WellPlate.length, Microscope.WellPlate.width, Microscope.height):centerXY():at(0, 0,
+  box(Microscope.length, Microscope.width, Microscope.height):center("XY"),
+  box(Microscope.WellPlate.length, Microscope.WellPlate.width, Microscope.height):center("XY"):at(0, 0,
     Microscope.height - Microscope.WellPlate.offset),
   box(Microscope.WellPlate.length - Microscope.WellPlate.offset,
     Microscope.WellPlate.width - Microscope.WellPlate.offset,
-    Microscope.height):centerXY()
+    Microscope.height):center("XY")
 ):at(0, 0, -Microscope.height - Ring.platform_height)
   :material(material("steel"))
 
@@ -574,7 +574,7 @@ HolderAdapter = {
 HolderAdapter.cutout_radius = (Ring.total_hole_width + Config.gap) / 2
 
 HolderAdapter.model = difference(
-  box(HolderAdapter.length, HolderAdapter.width, HolderAdapter.height):centerXY(),
+  box(HolderAdapter.length, HolderAdapter.width, HolderAdapter.height):center("XY"),
   cylinder(HolderAdapter.cutout_radius, HolderAdapter.height):at(0, 0, HolderAdapter.offset),
   cylinder(Ring.center_hole_radius, HolderAdapter.height)
 ):at(0, 0, -HolderAdapter.height - Ring.platform_height)

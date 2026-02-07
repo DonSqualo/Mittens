@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Text } from 'troika-three-text';
 
 // Setup
 const canvas = document.getElementById('main-canvas') as HTMLCanvasElement;
@@ -12,15 +13,22 @@ renderer.setClearColor(0x000000, 1);
 const scene = new THREE.Scene();
 
 // Camera (Z-up coordinate system)
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
 camera.up.set(0, 0, 1); // Z is up
-camera.position.set(-80, -150, 80); // View from front-left, slightly above
+
+// Default camera position (home view)
+const DEFAULT_CAMERA = {
+  position: new THREE.Vector3(-80, -150, 80),
+  target: new THREE.Vector3(0, 0, 20),
+  fov: 45
+};
+camera.position.copy(DEFAULT_CAMERA.position);
 
 // Controls
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
-controls.target.set(0, 0, 20); // Look at slightly above origin
+controls.target.copy(DEFAULT_CAMERA.target);
 
 // Restore camera from localStorage (survives page reloads)
 const saved_camera = localStorage.getItem('mittens_camera');
@@ -51,11 +59,18 @@ controls.addEventListener('end', () => {
 // Track last Lua camera to avoid resetting on unchanged reloads
 let last_lua_camera_key: string | null = null;
 
+// Store home camera position (from Lua, or default)
+let home_camera: { pos: [number, number, number], target: [number, number, number], fov: number, near: number, far: number } | null = null;
+
 // Current mesh and field visualizations
 let current_mesh: THREE.Mesh | null = null;
 let arrows_group: THREE.Group | null = null;
 let field_plane: THREE.Mesh | null = null;
 let flat_shading: boolean = true;
+
+// 3D text labels (troika-three-text)
+let labels_group: THREE.Group = new THREE.Group();
+scene.add(labels_group);
 
 // Measurement markers (GaussMeter, Hydrophone)
 let measurement_markers: THREE.Group | null = null;
@@ -952,7 +967,7 @@ function update_mesh(buffer: ArrayBuffer) {
     flat_shading = view.getUint8(8) === 1;
     const has_camera = view.getUint8(9) === 1;
 
-    if (has_camera && buffer.byteLength >= 38) {
+    if (has_camera && buffer.byteLength >= 46) {
       const cam_x = view.getFloat32(10, true);
       const cam_y = view.getFloat32(14, true);
       const cam_z = view.getFloat32(18, true);
@@ -960,19 +975,28 @@ function update_mesh(buffer: ArrayBuffer) {
       const tgt_y = view.getFloat32(26, true);
       const tgt_z = view.getFloat32(30, true);
       const fov = view.getFloat32(34, true);
+      const near = view.getFloat32(38, true);
+      const far = view.getFloat32(42, true);
+
+      console.log(`[VIEW] Received: near=${near}, far=${far}, fov=${fov}`);
+
+      // Store as home camera position (including near/far for clipping)
+      home_camera = { pos: [cam_x, cam_y, cam_z], target: [tgt_x, tgt_y, tgt_z], fov, near, far };
 
       // Only apply Lua camera if it changed (preserves user manipulation)
-      const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)}`;
+      const lua_key = `${cam_x.toFixed(2)},${cam_y.toFixed(2)},${cam_z.toFixed(2)},${tgt_x.toFixed(2)},${tgt_y.toFixed(2)},${tgt_z.toFixed(2)},${fov.toFixed(1)},${near.toFixed(2)},${far.toFixed(0)}`;
       if (lua_key !== last_lua_camera_key) {
         camera.position.set(cam_x, cam_y, cam_z);
         controls.target.set(tgt_x, tgt_y, tgt_z);
         camera.fov = fov;
+        camera.near = near;
+        camera.far = far;
         camera.updateProjectionMatrix();
         controls.update();
         last_lua_camera_key = lua_key;
         // Clear localStorage when Lua explicitly sets camera
         localStorage.removeItem('mittens_camera');
-        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}`);
+        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}, near=${near}, far=${far}`);
       } else {
         console.log(`View config: flat_shading=${flat_shading}, camera unchanged (keeping user position)`);
       }
@@ -1094,6 +1118,46 @@ function update_mesh(buffer: ArrayBuffer) {
   scene.add(current_mesh);
 }
 
+// Update 3D text labels
+interface Label {
+  text: string;
+  x: number;
+  y: number;
+  z: number;
+  size?: number;
+  color?: string;
+}
+
+function update_labels(labels: Label[]) {
+  // Clear existing labels
+  while (labels_group.children.length > 0) {
+    const child = labels_group.children[0];
+    if ((child as any).dispose) (child as any).dispose();
+    labels_group.remove(child);
+  }
+
+  // Create new labels
+  for (const label of labels) {
+    const text = new Text();
+    text.text = label.text;
+    text.fontSize = label.size || 5;
+    text.color = label.color || 0xffffff;
+    text.anchorX = 'center';
+    text.anchorY = 'middle';
+    
+    // Position (Mittens uses Z-up, troika uses Y-up by default)
+    text.position.set(label.x, label.y, label.z);
+    
+    // Rotate to lie on XZ plane, readable looking from -Y toward +Y
+    text.rotation.x = Math.PI / 2;  // Flip to face -Y direction
+    
+    text.sync();
+    labels_group.add(text);
+  }
+  
+  console.log(`Updated ${labels.length} text labels`);
+}
+
 // Status HUD (no GPU needed)
 const status_el = document.getElementById('status')!;
 const status_detail_el = document.getElementById('status-detail')!;
@@ -1101,12 +1165,20 @@ let last_update_time: Date | null = null;
 let last_edge_count = 0;
 let last_render_ms = 0;
 
+// Server info (file, branch, port)
+let server_info: { file: string; branch: string; port: number } | null = null;
+
 function format_time(date: Date): string {
-  return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
 }
 
 function update_status_display() {
-  if (last_update_time) {
+  if (last_update_time && server_info) {
+    const filename = server_info.file.split('/').pop() || server_info.file;
+    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port} · ${format_time(last_update_time)}`;
+    status_el.style.color = '#0f0';
+    status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
+  } else if (last_update_time) {
     status_el.textContent = `Updated ${format_time(last_update_time)}`;
     status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
   }
@@ -1119,8 +1191,14 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
     disconnected: '🔴',
     error: '❌',
   };
-  if (state !== 'connected' || !last_update_time) {
+  if (state === 'connected' && server_info) {
+    // Show file · branch · :port in green
+    const filename = server_info.file.split('/').pop() || server_info.file;
+    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port}`;
+    status_el.style.color = '#0f0';
+  } else if (state !== 'connected' || !last_update_time) {
     status_el.textContent = `${icons[state]} ${state.toUpperCase()}`;
+    status_el.style.color = '';  // Reset to default
     if (detail) {
       status_detail_el.textContent = detail;
     }
@@ -1131,7 +1209,10 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 
 // WebSocket
 function connect_websocket() {
-  const ws = new WebSocket(`ws://${window.location.hostname}:3001/ws`);
+  // Use path-based WebSocket routing through nginx
+  const basePath = import.meta.env.BASE_URL || '/';
+  const wsPath = basePath.endsWith('/') ? `${basePath}ws` : `${basePath}/ws`;
+  const ws = new WebSocket(`ws://${window.location.host}${wsPath}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -1146,6 +1227,24 @@ function connect_websocket() {
       last_render_ms = performance.now() - start;
       last_update_time = new Date();
       update_status_display();
+    } else if (typeof event.data === 'string') {
+      // JSON message - could be labels, info, or other metadata
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'labels' && Array.isArray(msg.labels)) {
+          update_labels(msg.labels);
+        } else if (msg.type === 'info') {
+          // Store server info and update status display
+          server_info = {
+            file: msg.file || 'unknown',
+            branch: msg.branch || 'unknown',
+            port: msg.port || 0
+          };
+          update_status('connected');
+        }
+      } catch (e) {
+        console.warn('Failed to parse JSON message:', e);
+      }
     }
   };
 
@@ -1202,6 +1301,118 @@ function animate() {
   update_circuit_position();
   renderer.render(scene, camera);
 }
+
+// Camera position display
+const camera_info = document.getElementById('camera-info')!;
+const camera_pos_el = document.getElementById('camera-pos')!;
+const camera_target_el = document.getElementById('camera-target')!;
+
+function update_camera_display() {
+  const p = camera.position;
+  const t = controls.target;
+  camera_pos_el.textContent = `[${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}]`;
+  camera_target_el.textContent = `[${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}]`;
+}
+
+camera_info.addEventListener('click', () => {
+  const p = camera.position;
+  const t = controls.target;
+  const config = `camera = {
+  position = {${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}},
+  target = {${t.x.toFixed(0)}, ${t.y.toFixed(0)}, ${t.z.toFixed(0)}},
+  up = {0, 0, 1}
+}`;
+
+  function showSuccess() {
+    camera_info.style.color = '#0a8';
+    setTimeout(() => camera_info.style.color = '', 500);
+  }
+  
+  function showFailure() {
+    camera_info.style.color = '#a00';
+    setTimeout(() => camera_info.style.color = '', 500);
+    console.warn('Clipboard copy failed');
+  }
+
+  // Mobile-friendly fallback copy
+  function fallbackCopy(text: string): boolean {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    // iOS requires the element to be visible and in viewport
+    textarea.style.position = 'fixed';
+    textarea.style.left = '0';
+    textarea.style.top = '0';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    // iOS Safari needs setSelectionRange
+    textarea.setSelectionRange(0, text.length);
+    let success = false;
+    try {
+      success = document.execCommand('copy');
+    } catch (e) {
+      console.warn('execCommand copy failed:', e);
+    }
+    document.body.removeChild(textarea);
+    return success;
+  }
+
+  // Try modern API first, then fallback
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(config).then(showSuccess).catch(() => {
+      if (fallbackCopy(config)) showSuccess();
+      else showFailure();
+    });
+  } else {
+    if (fallbackCopy(config)) showSuccess();
+    else showFailure();
+  }
+});
+
+// Update camera display on control changes
+controls.addEventListener('change', update_camera_display);
+update_camera_display();
+
+// Home button - reset camera to Lua home or default
+const home_btn = document.getElementById('home-btn');
+function reset_camera() {
+  // Use Lua-defined camera as home, or fall back to default
+  if (home_camera) {
+    camera.position.set(home_camera.pos[0], home_camera.pos[1], home_camera.pos[2]);
+    controls.target.set(home_camera.target[0], home_camera.target[1], home_camera.target[2]);
+    camera.fov = home_camera.fov;
+    camera.near = home_camera.near;
+    camera.far = home_camera.far;
+  } else {
+    camera.position.copy(DEFAULT_CAMERA.position);
+    controls.target.copy(DEFAULT_CAMERA.target);
+    camera.fov = DEFAULT_CAMERA.fov;
+    camera.near = 0.1;
+    camera.far = 100000;
+  }
+  camera.updateProjectionMatrix();
+  controls.update();
+  localStorage.removeItem('mittens_camera');
+  update_camera_display();
+  console.log('Camera reset to home position');
+  // Visual feedback
+  if (home_btn) {
+    home_btn.style.color = '#0a8';
+    setTimeout(() => home_btn.style.color = '', 300);
+  }
+}
+
+home_btn?.addEventListener('click', reset_camera);
+
+// Keyboard shortcut: H for home
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'h' || e.key === 'H') {
+    // Don't trigger if typing in an input
+    if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+    reset_camera();
+  }
+});
 
 // Start
 connect_websocket();

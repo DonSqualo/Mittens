@@ -27,3 +27,4 @@ test-results/
 node_modules/
 screenshots/
 *.stl
+.venv/

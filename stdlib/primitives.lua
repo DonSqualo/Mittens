@@ -47,21 +47,20 @@ local function Shape(sdf_func, bounds, metadata)
       return self
     end,
 
-    center = function(self, cx, cy, cz)
+    center = function(self, axes)
+      if type(axes) ~= "string" then
+        error("center() expects a string like 'XY' or 'XYZ'")
+      end
+      local axes_upper = axes:upper()
+      local cx = axes_upper:find("X") ~= nil
+      local cy = axes_upper:find("Y") ~= nil
+      local cz = axes_upper:find("Z") ~= nil
       local bounds = self._bounds
       local dx = cx and -((bounds.min[1] + bounds.max[1]) / 2) or 0
       local dy = cy and -((bounds.min[2] + bounds.max[2]) / 2) or 0
       local dz = cz and -((bounds.min[3] + bounds.max[3]) / 2) or 0
       table.insert(self._ops, {op = "translate", x = dx, y = dy, z = dz})
       return self
-    end,
-
-    centerXY = function(self)
-      return self:center(true, true, false)
-    end,
-
-    centered = function(self)
-      return self:center(true, true, true)
     end,
 
     eval = function(self, x, y, z)
@@ -208,6 +207,76 @@ function Primitives.ring(inner_radius, outer_radius, height)
     {min = {-outer_radius, -outer_radius, 0}, max = {outer_radius, outer_radius, height}},
     {primitive = "ring", params = {inner_radius = inner_radius, outer_radius = outer_radius, h = height}}
   )
+end
+
+--- Create text label in 3D space
+-- Text is rendered via troika-three-text in the renderer (not as mesh geometry)
+-- @param text_str The text string to render
+-- @param font_size Font size
+-- @return Shape object (placeholder that registers a label on positioning)
+function Primitives.text(text_str, font_size)
+  font_size = font_size or 10
+  
+  -- Estimate bounds based on text length and font size
+  local char_count = string.len(text_str)
+  local width = char_count * font_size * 0.6
+  local height = font_size
+  
+  -- Create a minimal shape that captures text info and registers label on serialize
+  local shape = Shape(
+    function(x, y, z) return 1 end,  -- SDF that returns positive (empty)
+    {min = {0, 0, 0}, max = {0.001, 0.001, 0.001}},  -- Tiny bounds (invisible)
+    {primitive = "empty", params = {}}  -- Empty primitive (no geometry)
+  )
+  
+  -- Store text info for label registration
+  shape._text_str = text_str
+  shape._font_size = font_size
+  shape._color = "#ffffff"  -- Default white
+  
+  -- Override material to capture color
+  local orig_material = shape.material
+  shape.material = function(self, mat)
+    if mat and mat.color then
+      local c = mat.color
+      -- Convert RGB to hex
+      local r = math.floor((c[1] or 1) * 255)
+      local g = math.floor((c[2] or 1) * 255)
+      local b = math.floor((c[3] or 1) * 255)
+      self._color = string.format("#%02x%02x%02x", r, g, b)
+    end
+    return orig_material(self, mat)
+  end
+  
+  -- Override serialize to register label with final position
+  local orig_serialize = shape.serialize
+  shape._label_registered = false
+  shape.serialize = function(self)
+    -- Only register once
+    if self._label_registered then
+      return nil
+    end
+    self._label_registered = true
+    
+    -- Calculate final position from ops
+    local x, y, z = 0, 0, 0
+    for _, op in ipairs(self._ops) do
+      if op.op == "translate" then
+        x = x + (op.x or 0)
+        y = y + (op.y or 0)
+        z = z + (op.z or 0)
+      end
+    end
+    
+    -- Register the label
+    local Mittens = require("stdlib")
+    Mittens.add_label(self._text_str, x, y, z, self._font_size, self._color)
+    
+    -- Return empty serialization (no mesh geometry)
+    return nil
+  end
+  
+  return shape
 end
 
 return Primitives

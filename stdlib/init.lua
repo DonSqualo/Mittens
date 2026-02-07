@@ -21,6 +21,7 @@ cylinder = Mittens.primitives.cylinder
 sphere = Mittens.primitives.sphere
 torus = Mittens.primitives.torus
 ring = Mittens.primitives.ring
+text = Mittens.primitives.text
 
 -- Export transform functions
 translate = Mittens.transforms.translate
@@ -98,6 +99,32 @@ function Mittens.register(obj)
   end
 end
 
+-- Labels storage
+Mittens._labels = {}
+
+--- Add a 3D text label to the scene
+-- @param text The text to display
+-- @param x X position
+-- @param y Y position  
+-- @param z Z position
+-- @param size Font size (optional, default 5)
+-- @param color Color string (optional, default white)
+function Mittens.add_label(text, x, y, z, size, color)
+  table.insert(Mittens._labels, {
+    text = text,
+    x = x,
+    y = y,
+    z = z,
+    size = size or 5,
+    color = color or "#ffffff"
+  })
+end
+
+--- Clear all labels
+function Mittens.clear_labels()
+  Mittens._labels = {}
+end
+
 --- Get the full scene for rendering
 -- @return Scene data
 function Mittens.get_scene()
@@ -107,6 +134,7 @@ function Mittens.get_scene()
     studies = Mittens.physics.get_studies(),
     exports = Mittens.export.serialize(),
     view = Mittens.view.serialize(),
+    labels = Mittens._labels,
   }
 end
 
@@ -137,6 +165,7 @@ function Mittens.serialize()
     studies = studies_serialized,
     exports = scene.exports,
     view = scene.view,
+    labels = scene.labels,
   }
 end
 
@@ -148,6 +177,7 @@ function Mittens.clear()
     studies = {},
     exports = {},
   }
+  Mittens._labels = {}
   Mittens.instruments.clear()
   Mittens.physics.clear()
   Mittens.export.clear()
@@ -157,5 +187,9 @@ end
 -- Version info
 Mittens.VERSION = "0.1.0"
 Mittens.NAME = "Mittens"
+
+-- Export label functions (must be after function definitions)
+add_label = Mittens.add_label
+clear_labels = Mittens.clear_labels
 
 return Mittens
