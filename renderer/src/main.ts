@@ -64,6 +64,7 @@ let home_camera: { pos: [number, number, number], target: [number, number, numbe
 
 // Current mesh and field visualizations
 let current_mesh: THREE.Mesh | null = null;
+let current_edges: THREE.LineSegments | null = null;
 let arrows_group: THREE.Group | null = null;
 let field_plane: THREE.Mesh | null = null;
 let flat_shading: boolean = true;
@@ -354,6 +355,19 @@ function parse_binary_mesh(buffer: ArrayBuffer): { geometry: THREE.BufferGeometr
   console.log(`Mesh: ${numVertices} vertices, ${numTriangles} triangles, ${numEdges} edges`);
 
   return { geometry, edges: numEdges };
+}
+
+function create_edge_overlay(geometry: THREE.BufferGeometry): THREE.LineSegments {
+  const wire = new THREE.WireframeGeometry(geometry);
+  const mat = new THREE.LineBasicMaterial({
+    color: 0x80f5ff,
+    transparent: true,
+    opacity: 0.2,
+    depthWrite: false,
+  });
+  const lines = new THREE.LineSegments(wire, mat);
+  lines.renderOrder = 10;
+  return lines;
 }
 
 // Plane type constants matching server
@@ -1081,6 +1095,14 @@ function update_mesh(buffer: ArrayBuffer) {
     scene.remove(current_mesh);
     current_mesh = null;
   }
+  if (current_edges) {
+    current_edges.geometry.dispose();
+    if (current_edges.material instanceof THREE.Material) {
+      current_edges.material.dispose();
+    }
+    scene.remove(current_edges);
+    current_edges = null;
+  }
 
   // Clear field visualizations from previous file
   if (arrows_group) {
@@ -1116,6 +1138,8 @@ function update_mesh(buffer: ArrayBuffer) {
   const material = create_xray_material(flat_shading);
   current_mesh = new THREE.Mesh(result.geometry, material);
   scene.add(current_mesh);
+  current_edges = create_edge_overlay(result.geometry);
+  scene.add(current_edges);
 }
 
 // Update 3D text labels
@@ -1485,11 +1509,31 @@ function reset_camera() {
 
 home_btn?.addEventListener('click', reset_camera);
 
-// Keyboard shortcut: H for home
+function is_typing_context(): boolean {
+  const active = document.activeElement;
+  if (!active) return false;
+  const tag = active.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return Boolean((active as HTMLElement).isContentEditable);
+}
+
+function open_graph_menu() {
+  const target = status_link_el?.href || '/graph';
+  window.location.href = target;
+}
+
+// Keyboard shortcuts: Ctrl/Cmd+K for graph, H for home
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'h' || e.key === 'H') {
-    // Don't trigger if typing in an input
-    if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+  if (is_typing_context()) return;
+  const key = e.key.toLowerCase();
+
+  if ((e.ctrlKey || e.metaKey) && key === 'k') {
+    e.preventDefault();
+    open_graph_menu();
+    return;
+  }
+
+  if (!e.ctrlKey && !e.metaKey && key === 'h') {
     reset_camera();
   }
 });

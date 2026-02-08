@@ -18,30 +18,21 @@ DEFAULT_SYSTEMD_USER_DIR="${HOME:-/tmp}/.config/systemd/user"
 usage() {
   cat <<'EOF'
 Usage:
-  mittens router start [--registry PATH] [--port N] [--log FILE] [--pid-file FILE]
-  mittens router stop [--pid-file FILE]
-  mittens router status [--pid-file FILE] [--port N]
+  # Canonical surface:
+  mittens router on [--registry PATH] [--port N] [--log FILE] [--pid-file FILE]
+  mittens router systemd on [--registry PATH] [--port N]
+  mittens router systemd off
+  mittens router systemd start|stop|restart|status|logs
 
-  mittens backend start --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH] [--log-dir DIR]
-  mittens backend stop --backend-id ID [--registry PATH]
-  mittens backend status [--backend-id ID] [--registry PATH]
-  mittens backend list [--registry PATH]
+  mittens server on --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH] [--log-dir DIR]
+  mittens server systemd on --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
+  mittens server systemd off --backend-id ID
+  mittens server systemd start|stop|restart|status|logs --backend-id ID
 
-  mittens run router [--registry PATH] [--port N]
-  mittens run backend --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
-  mittens run renderer --renderer-id ID --worktree PATH --port N [--host HOST]
-
-  mittens systemd router install [--registry PATH] [--port N]
-  mittens systemd router uninstall
-  mittens systemd router start|stop|restart|status|logs
-
-  mittens systemd backend install --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
-  mittens systemd backend uninstall --backend-id ID
-  mittens systemd backend start|stop|restart|status|logs --backend-id ID
-
-  mittens systemd renderer install --renderer-id ID --worktree PATH --port N [--host HOST]
-  mittens systemd renderer uninstall --renderer-id ID
-  mittens systemd renderer start|stop|restart|status|logs --renderer-id ID
+  mittens renderer on --renderer-id ID --worktree PATH --port N [--host HOST]
+  mittens renderer systemd on --renderer-id ID --worktree PATH --port N [--host HOST]
+  mittens renderer systemd off --renderer-id ID
+  mittens renderer systemd start|stop|restart|status|logs --renderer-id ID
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -237,7 +228,8 @@ router_start() {
     rm -f "$router_pid_file"
   fi
 
-  nohup "$REPO_ROOT/mittens" run router \
+  nohup "$REPO_ROOT/mittens" router on \
+    --foreground "1" \
     --registry "$registry_path" \
     --port "$router_port" >"$router_log" 2>&1 &
   local pid="$!"
@@ -308,6 +300,35 @@ router_status() {
   fi
 }
 
+is_truthy() {
+  local raw="$1"
+  case "${raw,,}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+router_on() {
+  local -A flags
+  parse_flags flags "$@"
+  local foreground
+  foreground="$(get_flag flags --foreground "0")"
+
+  local forwarded=()
+  local key
+  for key in "${!flags[@]}"; do
+    if [[ "$key" != "--foreground" ]]; then
+      forwarded+=("$key" "${flags[$key]}")
+    fi
+  done
+
+  if is_truthy "$foreground"; then
+    run_router_foreground "${forwarded[@]}"
+    return
+  fi
+  router_start "${forwarded[@]}"
+}
+
 backend_start() {
   local -A flags
   parse_flags flags "$@"
@@ -343,7 +364,8 @@ backend_start() {
   ensure_backend_bin_for_worktree "$worktree"
   ensure_registry_bin
 
-  nohup "$REPO_ROOT/mittens" run backend \
+  nohup "$REPO_ROOT/mittens" server on \
+    --foreground "1" \
     --backend-id "$backend_id" \
     --project-file "$project_file" \
     --projects-root "$projects_root" \
@@ -364,6 +386,27 @@ backend_start() {
   echo "project: $project_file"
   echo "ws_url: $ws_url"
   echo "log: $backend_log"
+}
+
+server_on() {
+  local -A flags
+  parse_flags flags "$@"
+  local foreground
+  foreground="$(get_flag flags --foreground "0")"
+
+  local forwarded=()
+  local key
+  for key in "${!flags[@]}"; do
+    if [[ "$key" != "--foreground" ]]; then
+      forwarded+=("$key" "${flags[$key]}")
+    fi
+  done
+
+  if is_truthy "$foreground"; then
+    run_backend_foreground "${forwarded[@]}"
+    return
+  fi
+  backend_start "${forwarded[@]}"
 }
 
 backend_stop() {
@@ -618,7 +661,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO_ROOT
-ExecStart=$REPO_ROOT/mittens run router --registry $registry_path --port $router_port
+ExecStart=$REPO_ROOT/mittens router on --foreground 1 --registry $registry_path --port $router_port
 Restart=always
 RestartSec=1
 Environment=HOME=${HOME:-/tmp}
@@ -715,7 +758,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO_ROOT
-ExecStart=$REPO_ROOT/mittens run backend --backend-id $backend_id --project-file $project_file --projects-root $projects_root --backend-port $backend_port --worktree $worktree --owner $owner --branch $branch --registry $registry_path
+ExecStart=$REPO_ROOT/mittens server on --foreground 1 --backend-id $backend_id --project-file $project_file --projects-root $projects_root --backend-port $backend_port --worktree $worktree --owner $owner --branch $branch --registry $registry_path
 Restart=always
 RestartSec=1
 Environment=HOME=${HOME:-/tmp}
@@ -809,7 +852,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$worktree
-ExecStart=$REPO_ROOT/mittens run renderer --renderer-id $renderer_id --worktree $worktree --port $port --host $host
+ExecStart=$REPO_ROOT/mittens renderer on --renderer-id $renderer_id --worktree $worktree --port $port --host $host
 Restart=always
 RestartSec=1
 Environment=HOME=${HOME:-/tmp}
@@ -882,65 +925,55 @@ main() {
       local action="${1:-}"
       [[ $# -gt 0 ]] && shift
       case "$action" in
-        start) router_start "$@" ;;
-        stop) router_stop "$@" ;;
-        status) router_status "$@" ;;
-        *) die "unknown router action '$action'" ;;
+        on) router_on "$@" ;;
+        systemd)
+          local systemd_action="${1:-}"
+          [[ $# -gt 0 ]] && shift
+          case "$systemd_action" in
+            on) systemd_router_install "$@" ;;
+            off) systemd_router_uninstall ;;
+            start|stop|restart|status|logs) systemd_router_action "$systemd_action" ;;
+            *) die "unknown router systemd action '$systemd_action'" ;;
+          esac
+          ;;
+        *) die "unknown router action '$action' (expected: on|systemd)" ;;
       esac
       ;;
-    backend)
+    server)
       local action="${1:-}"
       [[ $# -gt 0 ]] && shift
       case "$action" in
-        start) backend_start "$@" ;;
-        stop) backend_stop "$@" ;;
-        status) backend_status "$@" ;;
-        list) backend_list "$@" ;;
-        *) die "unknown backend action '$action'" ;;
+        on) server_on "$@" ;;
+        systemd)
+          local systemd_action="${1:-}"
+          [[ $# -gt 0 ]] && shift
+          case "$systemd_action" in
+            on) systemd_backend_install "$@" ;;
+            off) systemd_backend_uninstall "$@" ;;
+            start|stop|restart|status|logs) systemd_backend_action "$systemd_action" "$@" ;;
+            *) die "unknown server systemd action '$systemd_action'" ;;
+          esac
+          ;;
+        *) die "unknown server action '$action' (expected: on|systemd)" ;;
       esac
       ;;
-    run)
-      local target="${1:-}"
-      [[ $# -gt 0 ]] && shift
-      case "$target" in
-        router) run_router_foreground "$@" ;;
-        backend) run_backend_foreground "$@" ;;
-        renderer) run_renderer_foreground "$@" ;;
-        *) die "unknown run target '$target'" ;;
-      esac
-      ;;
-    systemd)
-      local target="${1:-}"
-      [[ $# -gt 0 ]] && shift
+    renderer)
       local action="${1:-}"
       [[ $# -gt 0 ]] && shift
-      case "$target" in
-        router)
-          case "$action" in
-            install) systemd_router_install "$@" ;;
-            uninstall) systemd_router_uninstall ;;
-            start|stop|restart|status|logs) systemd_router_action "$action" ;;
-            *) die "unknown systemd router action '$action'" ;;
-          esac
-          ;;
-        backend)
-          case "$action" in
-            install) systemd_backend_install "$@" ;;
-            uninstall) systemd_backend_uninstall "$@" ;;
-            start|stop|restart|status|logs) systemd_backend_action "$action" "$@" ;;
-            *) die "unknown systemd backend action '$action'" ;;
-          esac
-          ;;
-        renderer)
-          case "$action" in
-            install) systemd_renderer_install "$@" ;;
-            uninstall) systemd_renderer_uninstall "$@" ;;
-            start|stop|restart|status|logs) systemd_renderer_action "$action" "$@" ;;
-            *) die "unknown systemd renderer action '$action'" ;;
+      case "$action" in
+        on) run_renderer_foreground "$@" ;;
+        systemd)
+          local systemd_action="${1:-}"
+          [[ $# -gt 0 ]] && shift
+          case "$systemd_action" in
+            on) systemd_renderer_install "$@" ;;
+            off) systemd_renderer_uninstall "$@" ;;
+            start|stop|restart|status|logs) systemd_renderer_action "$systemd_action" "$@" ;;
+            *) die "unknown renderer systemd action '$systemd_action'" ;;
           esac
           ;;
         *)
-          die "unknown systemd target '$target'"
+          die "unknown renderer action '$action' (expected: on|systemd)"
           ;;
       esac
       ;;
