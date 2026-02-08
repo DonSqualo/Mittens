@@ -1,0 +1,961 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+SERVER_DIR="$REPO_ROOT/server"
+
+DEFAULT_REGISTRY_PATH="${HOME:-/tmp}/.mittens/backends.json"
+DEFAULT_ROUTER_PORT="3100"
+DEFAULT_RENDERER_HOST="0.0.0.0"
+DEFAULT_RUNTIME_DIR="${HOME:-/tmp}/.mittens/runtime"
+DEFAULT_BACKEND_LOG_DIR="$DEFAULT_RUNTIME_DIR/backends"
+DEFAULT_ROUTER_LOG="$DEFAULT_RUNTIME_DIR/router.log"
+DEFAULT_ROUTER_PID_FILE="$DEFAULT_RUNTIME_DIR/router.pid"
+DEFAULT_PROJECTS_ROOT="${MITTENS_PROJECTS_ROOT:-${HOME:-/tmp}/projects}"
+DEFAULT_SYSTEMD_USER_DIR="${HOME:-/tmp}/.config/systemd/user"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  mittens router start [--registry PATH] [--port N] [--log FILE] [--pid-file FILE]
+  mittens router stop [--pid-file FILE]
+  mittens router status [--pid-file FILE] [--port N]
+
+  mittens backend start --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH] [--log-dir DIR]
+  mittens backend stop --backend-id ID [--registry PATH]
+  mittens backend status [--backend-id ID] [--registry PATH]
+  mittens backend list [--registry PATH]
+
+  mittens run router [--registry PATH] [--port N]
+  mittens run backend --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
+  mittens run renderer --renderer-id ID --worktree PATH --port N [--host HOST]
+
+  mittens systemd router install [--registry PATH] [--port N]
+  mittens systemd router uninstall
+  mittens systemd router start|stop|restart|status|logs
+
+  mittens systemd backend install --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
+  mittens systemd backend uninstall --backend-id ID
+  mittens systemd backend start|stop|restart|status|logs --backend-id ID
+
+  mittens systemd renderer install --renderer-id ID --worktree PATH --port N [--host HOST]
+  mittens systemd renderer uninstall --renderer-id ID
+  mittens systemd renderer start|stop|restart|status|logs --renderer-id ID
+
+  mittens nginx snippet [--router-port N] [--output FILE]
+  mittens help
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+ensure_runtime_dirs() {
+  mkdir -p "$DEFAULT_RUNTIME_DIR" "$DEFAULT_BACKEND_LOG_DIR"
+}
+
+ensure_parent_dir() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+}
+
+ensure_registry_parent_dir() {
+  local registry_path="$1"
+  ensure_parent_dir "$registry_path"
+}
+
+ensure_registry_bin() {
+  (cd "$SERVER_DIR" && cargo build --quiet --no-default-features --bin backend_registry)
+}
+
+ensure_router_bin() {
+  (cd "$SERVER_DIR" && cargo build --quiet --no-default-features --bin router_service)
+}
+
+ensure_backend_bin_for_worktree() {
+  local worktree="$1"
+  (cd "$worktree/server" && cargo build --quiet --release --bin mittens-server)
+}
+
+registry_bin_path() {
+  echo "$SERVER_DIR/target/debug/backend_registry"
+}
+
+router_bin_path() {
+  echo "$SERVER_DIR/target/debug/router_service"
+}
+
+registry_cmd_with_build() {
+  local registry_path="$1"
+  shift
+  ensure_registry_parent_dir "$registry_path"
+  ensure_registry_bin
+  MITTENS_REGISTRY_PATH="$registry_path" "$(registry_bin_path)" "$@"
+}
+
+registry_cmd_no_build() {
+  local registry_path="$1"
+  shift
+  ensure_registry_parent_dir "$registry_path"
+  local bin_path
+  bin_path="$(registry_bin_path)"
+  [[ -x "$bin_path" ]] || die "backend_registry binary not found at $bin_path (run a build/install first)"
+  MITTENS_REGISTRY_PATH="$registry_path" "$bin_path" "$@"
+}
+
+registry_cmd() {
+  registry_cmd_with_build "$@"
+}
+
+parse_flags() {
+  local -n out_ref="$1"
+  shift
+  out_ref=()
+  while [[ $# -gt 0 ]]; do
+    local key="$1"
+    shift
+    if [[ "$key" != --* ]]; then
+      die "invalid flag '$key' (expected --key value)"
+    fi
+    if [[ $# -eq 0 ]]; then
+      die "missing value for '$key'"
+    fi
+    out_ref["$key"]="$1"
+    shift
+  done
+}
+
+get_flag() {
+  local -n map_ref="$1"
+  local key="$2"
+  local default_value="${3:-}"
+  if [[ -n "${map_ref[$key]+x}" ]]; then
+    echo "${map_ref[$key]}"
+  else
+    echo "$default_value"
+  fi
+}
+
+require_flag() {
+  local -n map_ref="$1"
+  local key="$2"
+  if [[ -z "${map_ref[$key]+x}" ]]; then
+    die "missing required flag '$key'"
+  fi
+  echo "${map_ref[$key]}"
+}
+
+pid_is_alive() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null
+}
+
+default_backend_port_from_id() {
+  local backend_id="$1"
+  if [[ "$backend_id" =~ ([0-9]+)$ ]]; then
+    echo $((4200 + ${BASH_REMATCH[1]}))
+    return
+  fi
+  local hash
+  hash="$(printf "%s" "$backend_id" | cksum | awk '{print $1}')"
+  echo $((4201 + (hash % 99)))
+}
+
+resolve_project_file() {
+  local raw_path="$1"
+  local projects_root="$2"
+
+  local projects_root_abs
+  projects_root_abs="$(readlink -f "$projects_root" 2>/dev/null || true)"
+  [[ -n "$projects_root_abs" ]] || die "projects root not found: $projects_root"
+
+  local candidate="$raw_path"
+  if [[ "$candidate" != /* ]]; then
+    candidate="${projects_root_abs}/${candidate}"
+  fi
+
+  local candidate_abs
+  candidate_abs="$(readlink -f "$candidate" 2>/dev/null || true)"
+  [[ -n "$candidate_abs" ]] || die "project file not found: $candidate"
+
+  case "$candidate_abs" in
+    "$projects_root_abs"/*) ;;
+    *) die "project file must be under projects root '$projects_root_abs': $candidate_abs" ;;
+  esac
+
+  echo "$candidate_abs"
+}
+
+require_no_whitespace() {
+  local name="$1"
+  local value="$2"
+  if [[ "$value" =~ [[:space:]] ]]; then
+    die "$name contains whitespace, unsupported for generated systemd unit: $value"
+  fi
+}
+
+sanitize_unit_id() {
+  local value="$1"
+  echo "$value" | tr -c 'A-Za-z0-9_.@-' '_'
+}
+
+ensure_renderer_deps_for_worktree() {
+  local worktree="$1"
+  local renderer_dir="$worktree/renderer"
+  [[ -d "$renderer_dir" ]] || die "renderer directory not found: $renderer_dir"
+  local vite_bin="$renderer_dir/node_modules/.bin/vite"
+  [[ -x "$vite_bin" ]] || die "renderer dependencies missing in $renderer_dir (expected $vite_bin, run: cd $renderer_dir && npm install)"
+}
+
+router_start() {
+  local -A flags
+  parse_flags flags "$@"
+
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  local router_port
+  router_port="$(get_flag flags --port "$DEFAULT_ROUTER_PORT")"
+  local router_log
+  router_log="$(get_flag flags --log "$DEFAULT_ROUTER_LOG")"
+  local router_pid_file
+  router_pid_file="$(get_flag flags --pid-file "$DEFAULT_ROUTER_PID_FILE")"
+
+  ensure_runtime_dirs
+  ensure_parent_dir "$router_log"
+  ensure_parent_dir "$router_pid_file"
+  ensure_router_bin
+
+  if [[ -f "$router_pid_file" ]]; then
+    local existing_pid
+    existing_pid="$(cat "$router_pid_file" 2>/dev/null || true)"
+    if [[ -n "$existing_pid" ]] && pid_is_alive "$existing_pid"; then
+      die "router already running (pid=$existing_pid)"
+    fi
+    rm -f "$router_pid_file"
+  fi
+
+  nohup "$REPO_ROOT/mittens" run router \
+    --registry "$registry_path" \
+    --port "$router_port" >"$router_log" 2>&1 &
+  local pid="$!"
+  echo "$pid" >"$router_pid_file"
+
+  sleep 0.4
+  if ! pid_is_alive "$pid"; then
+    rm -f "$router_pid_file"
+    die "router failed to start, see log: $router_log"
+  fi
+
+  echo "router started pid=$pid port=$router_port registry=$registry_path"
+  echo "log: $router_log"
+}
+
+router_stop() {
+  local -A flags
+  parse_flags flags "$@"
+  local router_pid_file
+  router_pid_file="$(get_flag flags --pid-file "$DEFAULT_ROUTER_PID_FILE")"
+
+  if [[ ! -f "$router_pid_file" ]]; then
+    die "router pid file not found: $router_pid_file"
+  fi
+
+  local pid
+  pid="$(cat "$router_pid_file")"
+  if pid_is_alive "$pid"; then
+    kill "$pid"
+    sleep 0.2
+    if pid_is_alive "$pid"; then
+      kill -9 "$pid" || true
+    fi
+    echo "router stopped pid=$pid"
+  else
+    echo "router not running (stale pid file)"
+  fi
+  rm -f "$router_pid_file"
+}
+
+router_status() {
+  local -A flags
+  parse_flags flags "$@"
+  local router_pid_file
+  router_pid_file="$(get_flag flags --pid-file "$DEFAULT_ROUTER_PID_FILE")"
+  local router_port
+  router_port="$(get_flag flags --port "$DEFAULT_ROUTER_PORT")"
+
+  if [[ ! -f "$router_pid_file" ]]; then
+    echo "router: stopped"
+    return 1
+  fi
+
+  local pid
+  pid="$(cat "$router_pid_file")"
+  if ! pid_is_alive "$pid"; then
+    echo "router: stopped (stale pid file)"
+    return 1
+  fi
+
+  echo "router: running pid=$pid port=$router_port"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:${router_port}/healthz" >/dev/null 2>&1; then
+      echo "router health: ok"
+    else
+      echo "router health: unreachable"
+    fi
+  fi
+}
+
+backend_start() {
+  local -A flags
+  parse_flags flags "$@"
+
+  local backend_id
+  backend_id="$(require_flag flags --backend-id)"
+  local project_file
+  project_file="$(require_flag flags --project-file)"
+  local projects_root
+  projects_root="$(get_flag flags --projects-root "$DEFAULT_PROJECTS_ROOT")"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  local worktree
+  worktree="$(get_flag flags --worktree "$REPO_ROOT")"
+  local owner
+  owner="$(get_flag flags --owner "${USER:-unknown}")"
+  local branch
+  branch="$(get_flag flags --branch "")"
+  local backend_port
+  backend_port="$(get_flag flags --backend-port "$(default_backend_port_from_id "$backend_id")")"
+  local log_dir
+  log_dir="$(get_flag flags --log-dir "$DEFAULT_BACKEND_LOG_DIR")"
+
+  project_file="$(resolve_project_file "$project_file" "$projects_root")"
+  ensure_runtime_dirs
+  mkdir -p "$log_dir"
+
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  local backend_log="${log_dir}/${backend_id}.log"
+  ensure_backend_bin_for_worktree "$worktree"
+  ensure_registry_bin
+
+  nohup "$REPO_ROOT/mittens" run backend \
+    --backend-id "$backend_id" \
+    --project-file "$project_file" \
+    --projects-root "$projects_root" \
+    --backend-port "$backend_port" \
+    --worktree "$worktree" \
+    --owner "$owner" \
+    --branch "$branch" \
+    --registry "$registry_path" >"$backend_log" 2>&1 &
+  local backend_pid="$!"
+
+  sleep 0.4
+  if ! pid_is_alive "$backend_pid"; then
+    die "backend failed to start backend_id=$backend_id, see log: $backend_log"
+  fi
+
+  local ws_url="ws://127.0.0.1:${backend_port}/ws"
+  echo "backend started id=$backend_id pid=$backend_pid port=$backend_port"
+  echo "project: $project_file"
+  echo "ws_url: $ws_url"
+  echo "log: $backend_log"
+}
+
+backend_stop() {
+  local -A flags
+  parse_flags flags "$@"
+  local backend_id
+  backend_id="$(require_flag flags --backend-id)"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+
+  local pid
+  pid="$(registry_cmd "$registry_path" field --backend-id "$backend_id" --name pid 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && pid_is_alive "$pid"; then
+    kill "$pid"
+    sleep 0.2
+    if pid_is_alive "$pid"; then
+      kill -9 "$pid" || true
+    fi
+    echo "backend stopped id=$backend_id pid=$pid"
+  else
+    echo "backend pid not running for id=$backend_id"
+  fi
+
+  registry_cmd "$registry_path" remove --backend-id "$backend_id" >/dev/null
+  echo "backend unregistered id=$backend_id"
+}
+
+backend_status() {
+  local -A flags
+  parse_flags flags "$@"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+
+  local backend_id
+  backend_id="$(get_flag flags --backend-id "")"
+  if [[ -n "$backend_id" ]]; then
+    registry_cmd "$registry_path" get --backend-id "$backend_id"
+    local pid
+    pid="$(registry_cmd "$registry_path" field --backend-id "$backend_id" --name pid 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && pid_is_alive "$pid"; then
+      echo "process_status=alive pid=$pid"
+    else
+      echo "process_status=dead"
+    fi
+    return
+  fi
+
+  registry_cmd "$registry_path" list
+}
+
+backend_list() {
+  local -A flags
+  parse_flags flags "$@"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  registry_cmd "$registry_path" list
+}
+
+run_router_foreground() {
+  local -A flags
+  parse_flags flags "$@"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  local router_port
+  router_port="$(get_flag flags --port "$DEFAULT_ROUTER_PORT")"
+
+  ensure_registry_parent_dir "$registry_path"
+  local router_bin
+  router_bin="$(router_bin_path)"
+  [[ -x "$router_bin" ]] || die "router_service binary not found at $router_bin (run router install/start first)"
+  MITTENS_REGISTRY_PATH="$registry_path" MITTENS_ROUTER_PORT="$router_port" "$router_bin"
+}
+
+run_backend_foreground() {
+  local -A flags
+  parse_flags flags "$@"
+
+  local backend_id
+  backend_id="$(require_flag flags --backend-id)"
+  local project_file
+  project_file="$(require_flag flags --project-file)"
+  local projects_root
+  projects_root="$(get_flag flags --projects-root "$DEFAULT_PROJECTS_ROOT")"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  local worktree
+  worktree="$(get_flag flags --worktree "$REPO_ROOT")"
+  local owner
+  owner="$(get_flag flags --owner "${USER:-unknown}")"
+  local branch
+  branch="$(get_flag flags --branch "")"
+  local backend_port
+  backend_port="$(get_flag flags --backend-port "$(default_backend_port_from_id "$backend_id")")"
+
+  project_file="$(resolve_project_file "$project_file" "$projects_root")"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  ensure_registry_parent_dir "$registry_path"
+
+  local ws_url="ws://127.0.0.1:${backend_port}/ws"
+  local backend_bin="$worktree/server/target/release/mittens-server"
+  [[ -x "$backend_bin" ]] || die "backend binary not found at $backend_bin (run backend install/start first)"
+  local registry_bin
+  registry_bin="$(registry_bin_path)"
+  [[ -x "$registry_bin" ]] || die "backend_registry binary not found at $registry_bin (run backend install/start first)"
+  local run_pid="$$"
+
+  registry_cmd_no_build "$registry_path" upsert \
+    --backend-id "$backend_id" \
+    --ws-url "$ws_url" \
+    --project-file "$project_file" \
+    --branch "$branch" \
+    --owner "$owner" \
+    --worktree "$worktree" \
+    --backend-port "$backend_port" \
+    --pid "$run_pid" >/dev/null
+
+  trap 'registry_cmd_no_build "'"$registry_path"'" remove --backend-id "'"$backend_id"'" >/dev/null 2>&1 || true' EXIT INT TERM
+
+  cd "$worktree"
+  MITTENS_PORT="$backend_port" "$backend_bin" "$project_file"
+}
+
+run_renderer_foreground() {
+  local -A flags
+  parse_flags flags "$@"
+  local renderer_id
+  renderer_id="$(require_flag flags --renderer-id)"
+  local worktree
+  worktree="$(require_flag flags --worktree)"
+  local port
+  port="$(require_flag flags --port)"
+  local host
+  host="$(get_flag flags --host "$DEFAULT_RENDERER_HOST")"
+
+  require_no_whitespace "renderer_id" "$renderer_id"
+  require_no_whitespace "worktree" "$worktree"
+  require_no_whitespace "port" "$port"
+  require_no_whitespace "host" "$host"
+
+  ensure_renderer_deps_for_worktree "$worktree"
+
+  local renderer_dir="$worktree/renderer"
+  local vite_bin="$renderer_dir/node_modules/.bin/vite"
+  local renderer_branch
+  renderer_branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
+  cd "$renderer_dir"
+  VITE_MITTENS_RENDERER_ID="$renderer_id" \
+  VITE_MITTENS_RENDERER_BRANCH="$renderer_branch" \
+  "$vite_bin" --host "$host" --port "$port" --strictPort
+}
+
+nginx_snippet() {
+  local -A flags
+  parse_flags flags "$@"
+  local router_port
+  router_port="$(get_flag flags --router-port "$DEFAULT_ROUTER_PORT")"
+  local output_file
+  output_file="$(get_flag flags --output "")"
+
+  local snippet
+  snippet="$(cat <<EOF
+# Mittens Router Service
+# Route all backend websocket requests by backend_id.
+location /ws/ {
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host \$host;
+    proxy_pass http://127.0.0.1:${router_port};
+}
+
+# Backend discovery endpoint.
+location = /api/backends {
+    proxy_pass http://127.0.0.1:${router_port}/api/backends;
+}
+
+# Router graph API endpoint.
+location = /api/graph {
+    proxy_pass http://127.0.0.1:${router_port}/api/graph;
+}
+
+# Human-readable graph menu.
+location = /graph {
+    proxy_pass http://127.0.0.1:${router_port}/graph;
+}
+EOF
+)"
+
+  if [[ -n "$output_file" ]]; then
+    printf "%s\n" "$snippet" >"$output_file"
+    echo "wrote nginx snippet: $output_file"
+  else
+    printf "%s\n" "$snippet"
+  fi
+}
+
+systemd_require_user() {
+  command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
+}
+
+systemd_router_unit_path() {
+  echo "$DEFAULT_SYSTEMD_USER_DIR/mittens-router.service"
+}
+
+systemd_backend_unit_name() {
+  local backend_id="$1"
+  local safe_id
+  safe_id="$(sanitize_unit_id "$backend_id")"
+  echo "mittens-backend-${safe_id}.service"
+}
+
+systemd_backend_unit_path() {
+  local backend_id="$1"
+  echo "$DEFAULT_SYSTEMD_USER_DIR/$(systemd_backend_unit_name "$backend_id")"
+}
+
+systemd_renderer_unit_name() {
+  local renderer_id="$1"
+  local safe_id
+  safe_id="$(sanitize_unit_id "$renderer_id")"
+  echo "mittens-renderer-${safe_id}.service"
+}
+
+systemd_renderer_unit_path() {
+  local renderer_id="$1"
+  echo "$DEFAULT_SYSTEMD_USER_DIR/$(systemd_renderer_unit_name "$renderer_id")"
+}
+
+systemd_router_install() {
+  local -A flags
+  parse_flags flags "$@"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  local router_port
+  router_port="$(get_flag flags --port "$DEFAULT_ROUTER_PORT")"
+
+  systemd_require_user
+  mkdir -p "$DEFAULT_SYSTEMD_USER_DIR"
+  ensure_registry_parent_dir "$registry_path"
+  ensure_router_bin
+
+  local unit_path
+  unit_path="$(systemd_router_unit_path)"
+  cat >"$unit_path" <<EOF
+[Unit]
+Description=Mittens Router Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO_ROOT
+ExecStart=$REPO_ROOT/mittens run router --registry $registry_path --port $router_port
+Restart=always
+RestartSec=1
+Environment=HOME=${HOME:-/tmp}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${HOME:-/tmp}/.cargo/bin
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now mittens-router.service
+  echo "installed and started mittens-router.service"
+}
+
+systemd_router_uninstall() {
+  systemd_require_user
+  local unit_path
+  unit_path="$(systemd_router_unit_path)"
+  systemctl --user disable --now mittens-router.service >/dev/null 2>&1 || true
+  rm -f "$unit_path"
+  systemctl --user daemon-reload
+  echo "uninstalled mittens-router.service"
+}
+
+systemd_router_action() {
+  local action="$1"
+  case "$action" in
+    start|stop|restart)
+      systemctl --user "$action" mittens-router.service
+      ;;
+    status)
+      systemctl --user status mittens-router.service --no-pager -l
+      ;;
+    logs)
+      journalctl --user -u mittens-router.service -n 200 --no-pager
+      ;;
+    *)
+      die "unknown systemd router action '$action'"
+      ;;
+  esac
+}
+
+systemd_backend_install() {
+  local -A flags
+  parse_flags flags "$@"
+
+  local backend_id
+  backend_id="$(require_flag flags --backend-id)"
+  local project_file
+  project_file="$(require_flag flags --project-file)"
+  local projects_root
+  projects_root="$(get_flag flags --projects-root "$DEFAULT_PROJECTS_ROOT")"
+  local registry_path
+  registry_path="$(get_flag flags --registry "$DEFAULT_REGISTRY_PATH")"
+  local worktree
+  worktree="$(get_flag flags --worktree "$REPO_ROOT")"
+  local owner
+  owner="$(get_flag flags --owner "${USER:-unknown}")"
+  local branch
+  branch="$(get_flag flags --branch "")"
+  local backend_port
+  backend_port="$(get_flag flags --backend-port "$(default_backend_port_from_id "$backend_id")")"
+
+  project_file="$(resolve_project_file "$project_file" "$projects_root")"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  require_no_whitespace "registry_path" "$registry_path"
+  require_no_whitespace "project_file" "$project_file"
+  require_no_whitespace "projects_root" "$projects_root"
+  require_no_whitespace "worktree" "$worktree"
+  require_no_whitespace "owner" "$owner"
+  require_no_whitespace "branch" "$branch"
+  require_no_whitespace "backend_id" "$backend_id"
+  require_no_whitespace "backend_port" "$backend_port"
+
+  systemd_require_user
+  mkdir -p "$DEFAULT_SYSTEMD_USER_DIR"
+  ensure_registry_parent_dir "$registry_path"
+  ensure_backend_bin_for_worktree "$worktree"
+  ensure_registry_bin
+
+  local unit_name
+  unit_name="$(systemd_backend_unit_name "$backend_id")"
+  local unit_path
+  unit_path="$(systemd_backend_unit_path "$backend_id")"
+
+  cat >"$unit_path" <<EOF
+[Unit]
+Description=Mittens Backend Service ($backend_id)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO_ROOT
+ExecStart=$REPO_ROOT/mittens run backend --backend-id $backend_id --project-file $project_file --projects-root $projects_root --backend-port $backend_port --worktree $worktree --owner $owner --branch $branch --registry $registry_path
+Restart=always
+RestartSec=1
+Environment=HOME=${HOME:-/tmp}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${HOME:-/tmp}/.cargo/bin
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$unit_name"
+  echo "installed and started $unit_name"
+}
+
+systemd_backend_uninstall() {
+  local -A flags
+  parse_flags flags "$@"
+  local backend_id
+  backend_id="$(require_flag flags --backend-id)"
+
+  systemd_require_user
+  local unit_name
+  unit_name="$(systemd_backend_unit_name "$backend_id")"
+  local unit_path
+  unit_path="$(systemd_backend_unit_path "$backend_id")"
+
+  systemctl --user disable --now "$unit_name" >/dev/null 2>&1 || true
+  rm -f "$unit_path"
+  systemctl --user daemon-reload
+  echo "uninstalled $unit_name"
+}
+
+systemd_backend_action() {
+  local action="$1"
+  shift
+  local -A flags
+  parse_flags flags "$@"
+  local backend_id
+  backend_id="$(require_flag flags --backend-id)"
+  local unit_name
+  unit_name="$(systemd_backend_unit_name "$backend_id")"
+
+  case "$action" in
+    start|stop|restart)
+      systemctl --user "$action" "$unit_name"
+      ;;
+    status)
+      systemctl --user status "$unit_name" --no-pager -l
+      ;;
+    logs)
+      journalctl --user -u "$unit_name" -n 200 --no-pager
+      ;;
+    *)
+      die "unknown systemd backend action '$action'"
+      ;;
+  esac
+}
+
+systemd_renderer_install() {
+  local -A flags
+  parse_flags flags "$@"
+
+  local renderer_id
+  renderer_id="$(require_flag flags --renderer-id)"
+  local worktree
+  worktree="$(require_flag flags --worktree)"
+  local port
+  port="$(require_flag flags --port)"
+  local host
+  host="$(get_flag flags --host "$DEFAULT_RENDERER_HOST")"
+
+  require_no_whitespace "renderer_id" "$renderer_id"
+  require_no_whitespace "worktree" "$worktree"
+  require_no_whitespace "port" "$port"
+  require_no_whitespace "host" "$host"
+
+  systemd_require_user
+  mkdir -p "$DEFAULT_SYSTEMD_USER_DIR"
+  ensure_renderer_deps_for_worktree "$worktree"
+
+  local unit_name
+  unit_name="$(systemd_renderer_unit_name "$renderer_id")"
+  local unit_path
+  unit_path="$(systemd_renderer_unit_path "$renderer_id")"
+
+  cat >"$unit_path" <<EOF
+[Unit]
+Description=Mittens Renderer Service ($renderer_id)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$worktree
+ExecStart=$REPO_ROOT/mittens run renderer --renderer-id $renderer_id --worktree $worktree --port $port --host $host
+Restart=always
+RestartSec=1
+Environment=HOME=${HOME:-/tmp}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:${HOME:-/tmp}/.cargo/bin
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$unit_name"
+  echo "installed and started $unit_name"
+}
+
+systemd_renderer_uninstall() {
+  local -A flags
+  parse_flags flags "$@"
+  local renderer_id
+  renderer_id="$(require_flag flags --renderer-id)"
+
+  systemd_require_user
+  local unit_name
+  unit_name="$(systemd_renderer_unit_name "$renderer_id")"
+  local unit_path
+  unit_path="$(systemd_renderer_unit_path "$renderer_id")"
+
+  systemctl --user disable --now "$unit_name" >/dev/null 2>&1 || true
+  rm -f "$unit_path"
+  systemctl --user daemon-reload
+  echo "uninstalled $unit_name"
+}
+
+systemd_renderer_action() {
+  local action="$1"
+  shift
+  local -A flags
+  parse_flags flags "$@"
+  local renderer_id
+  renderer_id="$(require_flag flags --renderer-id)"
+  local unit_name
+  unit_name="$(systemd_renderer_unit_name "$renderer_id")"
+
+  case "$action" in
+    start|stop|restart)
+      systemctl --user "$action" "$unit_name"
+      ;;
+    status)
+      systemctl --user status "$unit_name" --no-pager -l
+      ;;
+    logs)
+      journalctl --user -u "$unit_name" -n 200 --no-pager
+      ;;
+    *)
+      die "unknown systemd renderer action '$action'"
+      ;;
+  esac
+}
+
+main() {
+  local category="${1:-help}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$category" in
+    help|-h|--help)
+      usage
+      ;;
+    router)
+      local action="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      case "$action" in
+        start) router_start "$@" ;;
+        stop) router_stop "$@" ;;
+        status) router_status "$@" ;;
+        *) die "unknown router action '$action'" ;;
+      esac
+      ;;
+    backend)
+      local action="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      case "$action" in
+        start) backend_start "$@" ;;
+        stop) backend_stop "$@" ;;
+        status) backend_status "$@" ;;
+        list) backend_list "$@" ;;
+        *) die "unknown backend action '$action'" ;;
+      esac
+      ;;
+    run)
+      local target="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      case "$target" in
+        router) run_router_foreground "$@" ;;
+        backend) run_backend_foreground "$@" ;;
+        renderer) run_renderer_foreground "$@" ;;
+        *) die "unknown run target '$target'" ;;
+      esac
+      ;;
+    systemd)
+      local target="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      local action="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      case "$target" in
+        router)
+          case "$action" in
+            install) systemd_router_install "$@" ;;
+            uninstall) systemd_router_uninstall ;;
+            start|stop|restart|status|logs) systemd_router_action "$action" ;;
+            *) die "unknown systemd router action '$action'" ;;
+          esac
+          ;;
+        backend)
+          case "$action" in
+            install) systemd_backend_install "$@" ;;
+            uninstall) systemd_backend_uninstall "$@" ;;
+            start|stop|restart|status|logs) systemd_backend_action "$action" "$@" ;;
+            *) die "unknown systemd backend action '$action'" ;;
+          esac
+          ;;
+        renderer)
+          case "$action" in
+            install) systemd_renderer_install "$@" ;;
+            uninstall) systemd_renderer_uninstall "$@" ;;
+            start|stop|restart|status|logs) systemd_renderer_action "$action" "$@" ;;
+            *) die "unknown systemd renderer action '$action'" ;;
+          esac
+          ;;
+        *)
+          die "unknown systemd target '$target'"
+          ;;
+      esac
+      ;;
+    nginx)
+      local action="${1:-}"
+      [[ $# -gt 0 ]] && shift
+      case "$action" in
+        snippet) nginx_snippet "$@" ;;
+        *) die "unknown nginx action '$action'" ;;
+      esac
+      ;;
+    *)
+      die "unknown command '$category'"
+      ;;
+  esac
+}
+
+main "$@"
