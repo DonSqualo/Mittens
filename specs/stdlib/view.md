@@ -88,6 +88,8 @@ View.load(state)
 - `camera.position` (x, y, z)
 - `camera.target` (x, y, z)
 - `camera.fov`
+- `camera.near`
+- `camera.far`
 
 Other view state (visibility, clipping) is NOT persisted via `View.serialize()`.
 

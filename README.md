@@ -1,6 +1,6 @@
-# Mittens 🐱
+# Mittens: Markdown for Reality
 
-**Markdown for Reality: Electronic Lab / Machine Shop / Human Body simulator for Agents and Keyboard Monkeys**
+## Electronic Lab / Machine Shop / Human Body simulator for Agents and Keyboard Monkeys
 
 Mittens is a script-first CAD and multiphysics environment driven by Lua, a Rust backend, and a WebGPU renderer. It is built for rapid agent-assisted iteration on geometry, field studies, and instrumented experiments.
 
@@ -12,7 +12,8 @@ Mittens is a script-first CAD and multiphysics environment driven by Lua, a Rust
 
 ./mittens backend start \
   --backend-id pure-acoustics \
-  --project-file /home/heim/projects/pure-acoustics/pure_acoustics.lua \
+  --project-file examples/pure_acoustics.lua \
+  --projects-root "$PWD" \
   --backend-port 4293 \
   --worktree "$PWD" \
   --registry "$HOME/.mittens/backends.json"
@@ -31,7 +32,8 @@ Open:
 Notes:
 
 - Router is the single `/ws/<backend_id>` entry point.
-- `backend start` enforces project files under `~/projects` by default.
+- To use repo examples, pass `--projects-root "$PWD"` with `--project-file examples/...`.
+- Example set is intentionally minimal: `examples/pure_acoustics.lua` and `examples/tube.lua`.
 - Full command surface: `./mittens help`
 
 ## CLI Overview

@@ -28,7 +28,7 @@ Lua (stdlib/csg.lua)
 
 ## Lua API
 
-All CSG results support: `at`, `rotate`, `scale`, `center`, `centered`, `centerXY`, `material`, `color`, `name`, `eval`, `serialize`.
+All CSG results support: `at`, `rotate`, `scale`, `center`, `material`, `color`, `name`, `eval`, `serialize`.
 
 ### union(...)
 

@@ -1,6 +1,6 @@
 # Gotchas
 
-Known pitfalls for Claude agents working on this codebase.
+Known pitfalls for contributors working on this codebase.
 
 ## Coordinate Origins
 
@@ -10,8 +10,8 @@ Known pitfalls for Claude agents working on this codebase.
 
 ```lua
 -- To center both at origin:
-box(10):centered()       -- now at (-5,-5,-5) to (5,5,5)
-cylinder(5, 20):centered()  -- now at (-5,-5,-10) to (5,5,10)
+box(10):center("XYZ")       -- now at (-5,-5,-5) to (5,5,5)
+cylinder(5, 20):center("XYZ")  -- now at (-5,-5,-10) to (5,5,10)
 ```
 
 ## Transform Order
@@ -41,13 +41,13 @@ u._type  -- "shape", NOT "csg"
 
 ## Group Bounds After Remove
 
-`group:add(child)` updates bounds. `group:remove(child)` does NOT recalculate.
+`group:add(child)` and `group:remove(child)` both recalculate bounds.
 
 ```lua
 local g = group({box(10), box(10):at(100, 0, 0)})
 -- bounds: 0 to 110
 g:remove(g._children[2])
--- bounds still 0 to 110 (stale)
+-- bounds now 0 to 10
 ```
 
 ## View Serialization

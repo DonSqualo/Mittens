@@ -7,7 +7,7 @@ Post-project review process. After completing a project, run through these quest
 ### 1. Core Pipeline Changes
 
 Did you modify any of these files?
-- `server/src/geometry_manifold.rs`
+- `server/src/geometry.rs`
 - `server/src/export.rs`
 - `server/src/main.rs`
 - `renderer/src/main.ts`
@@ -21,7 +21,7 @@ Did you modify any of these files?
 
 ### 2. Generated Primitives
 
-Did Claude generate new primitives (torus, sphere, wedge, etc.)?
+Did tooling generate new primitives (torus, sphere, wedge, etc.)?
 
 **Always discard the code.** But ask:
 - Did generating this primitive reveal a gotcha? → **Add to gotchas.md**
@@ -54,7 +54,7 @@ STL, STEP, 3MF files, simulation results.
 
 ## Questions Template
 
-After a project, Claude should ask:
+After a project, contributors should ask:
 
 ```
 Project complete. Garbage collection review:

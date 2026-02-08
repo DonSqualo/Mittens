@@ -1,119 +1,89 @@
 # Router Service
 
-This is an additive routing layer for many-renderer/many-server setups.
+Mittens supports multiple backends and renderers through a single router.
 
-Strict behavior:
-- Renderer must use `?backend_id=<id>`.
-- Renderer connects only to `/ws/<id>`.
-- No fallback `/ws` route is used by renderer.
-- Router resolves `<id>` from one single runtime registry file.
+## Behavior
 
-## Single Source Of Truth
+- Renderer must include `?backend_id=<id>`.
+- Renderer connects to `/ws/<backend_id>`.
+- Router resolves backend metadata from one registry file.
 
-Registry file:
-- `~/.mittens/backends.json`
+## Registry
 
-Override path:
-- set `MITTENS_REGISTRY_PATH` if needed
+- Default path: `$HOME/.mittens/backends.json`
+- Override: `MITTENS_REGISTRY_PATH`
 
-No per-branch config files. No per-agent config files.
-
-Project file policy:
-- backend project files must resolve under `~/projects` (enforced by `mittens backend start`)
-- files under repo `examples/` are rejected by CLI
-
-## Registry Schema
+Example entry:
 
 ```json
 {
-  "updated_at_unix_ms": 0,
-  "backends": [
-    {
-      "backend_id": "a1",
-      "ws_url": "ws://127.0.0.1:4201/ws",
-      "project_file": "/home/heim/projects/helmholtz/helmholtz_coil.lua",
-      "branch": "codex/feature-x",
-      "owner": "codex-a",
-      "worktree": "/home/heim/Private_Mittens/codex-a",
-      "backend_port": 4201,
-      "pid": 12345,
-      "updated_at_unix_ms": 0
-    }
-  ]
+  "backend_id": "a1",
+  "ws_url": "ws://127.0.0.1:4201/ws",
+  "project_file": "/abs/path/to/project.lua",
+  "branch": "codex/feature-a1",
+  "owner": "dev-a",
+  "worktree": "/abs/path/to/worktree",
+  "backend_port": 4201,
+  "pid": 12345,
+  "updated_at_unix_ms": 0
 }
 ```
 
 ## Endpoints
 
 - `GET /api/backends`
+- `GET /api/graph`
+- `GET /graph`
 - `GET /ws/<backend_id>`
 - `GET /healthz`
 
-## Binaries
+## CLI Quick Usage
+
+From repo root:
+
+```bash
+./mittens router start --registry "$HOME/.mittens/backends.json" --port 3100
+
+./mittens backend start \
+  --backend-id a1 \
+  --project-file examples/pure_acoustics.lua \
+  --projects-root "$PWD" \
+  --backend-port 4201 \
+  --worktree "$PWD" \
+  --registry "$HOME/.mittens/backends.json"
+
+./mittens run renderer \
+  --renderer-id local \
+  --worktree "$PWD" \
+  --port 3000 \
+  --host 0.0.0.0
+```
+
+Open:
+
+- `http://localhost:3000/?backend_id=a1`
+
+## Low-Level Binaries
 
 - `server/src/bin/router_service.rs`
 - `server/src/bin/backend_registry.rs`
-- `mittens` (CLI wrapper for router/backends/nginx)
 
-## Commands
-
-Initialize registry:
+Initialize registry manually:
 
 ```bash
-cd /home/heim/Private_Mittens/codex/server
+cd server
 MITTENS_REGISTRY_PATH="$HOME/.mittens/backends.json" \
 cargo run --no-default-features --bin backend_registry -- init
 ```
 
-Upsert backend entry:
+Run router manually:
 
 ```bash
-cd /home/heim/Private_Mittens/codex/server
-MITTENS_REGISTRY_PATH="$HOME/.mittens/backends.json" \
-cargo run --no-default-features --bin backend_registry -- upsert \
-  --backend-id a1 \
-  --ws-url ws://127.0.0.1:4201/ws \
-  --project-file /home/heim/projects/helmholtz/helmholtz_coil.lua \
-  --branch codex/feature-a1 \
-  --owner codex-a \
-  --worktree /home/heim/Private_Mittens/codex-a1
-```
-
-Remove backend entry:
-
-```bash
-cd /home/heim/Private_Mittens/codex/server
-MITTENS_REGISTRY_PATH="$HOME/.mittens/backends.json" \
-cargo run --no-default-features --bin backend_registry -- remove \
-  --backend-id a1
-```
-
-List registry:
-
-```bash
-cd /home/heim/Private_Mittens/codex/server
-MITTENS_REGISTRY_PATH="$HOME/.mittens/backends.json" \
-cargo run --no-default-features --bin backend_registry -- list
-```
-
-Run router service:
-
-```bash
-cd /home/heim/Private_Mittens/codex/server
+cd server
 MITTENS_REGISTRY_PATH="$HOME/.mittens/backends.json" \
 MITTENS_ROUTER_PORT=3100 \
 cargo run --no-default-features --bin router_service
 ```
-
-## Renderer Usage
-
-Required:
-- `http://host/<existing-path>/?backend_id=a1`
-
-This connects to:
-- `/ws/a1`
-
-No `backend_id`, no connection.
 
 ## Nginx Example
 
@@ -125,51 +95,3 @@ location /ws/ {
     proxy_pass http://127.0.0.1:3100;
 }
 ```
-
-## CLI Usage
-
-Router:
-
-```bash
-mittens router start --registry "$HOME/.mittens/backends.json" --port 3100
-mittens router status --port 3100
-mittens router stop
-```
-
-Backends:
-
-```bash
-mittens backend start \
-  --backend-id a1 \
-  --project-file /home/heim/projects/helmholtz/helmholtz_coil.lua \
-  --backend-port 4201 \
-  --worktree /home/heim/Private_Mittens/codex \
-  --registry "$HOME/.mittens/backends.json"
-
-mittens backend status --backend-id a1 --registry "$HOME/.mittens/backends.json"
-mittens backend stop --backend-id a1 --registry "$HOME/.mittens/backends.json"
-mittens backend list --registry "$HOME/.mittens/backends.json"
-```
-
-Nginx snippet generation:
-
-```bash
-mittens nginx snippet --router-port 3100 --output /tmp/mittens-router.nginx.conf
-```
-
-## Persistent Runtime (Recommended)
-
-Use systemd user services for auto-restart:
-
-```bash
-mittens systemd router install --port 3100
-mittens systemd backend install \
-  --backend-id pure-acoustics \
-  --project-file /home/heim/projects/pure-acoustics/pure_acoustics.lua \
-  --worktree /home/heim/Private_Mittens/codex
-
-mittens systemd router status
-mittens systemd backend status --backend-id pure-acoustics
-```
-
-These units run with `Restart=always`, so backend/router recover from crashes and session exits.
