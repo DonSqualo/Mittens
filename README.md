@@ -61,10 +61,8 @@ The current public surface is exported in `stdlib/init.lua`.
 - `local Mittens = require("stdlib")`
 - `Mittens.register(obj)`
 - `Mittens.serialize()`
-- `Mittens.get_scene()`
-- `Mittens.clear()`
-- `Mittens.add_label(text, x, y, z, size?, color?)`
-- `Mittens.clear_labels()`
+
+Label placement should use the `text(...)` primitive in scene scripts.
 
 ### Global Geometry + Composition
 
