@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
-use futures::{SinkExt, StreamExt};
+use futures::{future::join_all, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -116,6 +116,7 @@ struct BackendNode {
     systemd_unit: String,
     live_connection_count: usize,
     listening_renderer_ids: Vec<String>,
+    reachable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,6 +300,7 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       --muted: #8e8e8e;
       --renderer: #74b285;
       --backend: #7895ad;
+      --down: #df4f4f;
     }
     * { box-sizing: border-box; }
     body {
@@ -384,6 +386,21 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       background: rgba(120, 149, 173, 0.12);
       color: #dae4eb;
     }
+    .card.down-backend {
+      border-color: #8a2f2f;
+      background: rgba(160, 45, 45, 0.16);
+    }
+    .card.down-backend .title {
+      color: #ff8f8f;
+    }
+    .card.active-backend.down-backend {
+      border-color: var(--down);
+      background: rgba(223, 79, 79, 0.22);
+      color: #ffd6d6;
+    }
+    .card.key-focus {
+      box-shadow: inset 0 0 0 1px #e5e5e5;
+    }
     .card.disabled {
       opacity: 0.55;
       cursor: not-allowed;
@@ -431,6 +448,9 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
     let selectedRendererId = requestedRenderer || null;
     let selectedBackendId = focusBackend || null;
     let latestGraph = null;
+    let focusedColumn = focusBackend ? 'backend' : 'renderer';
+    let rendererCursor = 0;
+    let backendCursor = 0;
 
     function esc(value) {
       return String(value ?? '')
@@ -473,18 +493,126 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       window.history.replaceState(null, '', nextUrl);
     }
 
+    function clampIndex(index, length) {
+      if (!length || length <= 0) return 0;
+      return Math.max(0, Math.min(index, length - 1));
+    }
+
+    function isTypingContext() {
+      const active = document.activeElement;
+      if (!active) return false;
+      const tag = active.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      return Boolean(active.isContentEditable);
+    }
+
+    function currentRenderers() {
+      return (latestGraph && latestGraph.renderers) || [];
+    }
+
+    function currentBackends() {
+      return (latestGraph && latestGraph.backends) || [];
+    }
+
+    function syncRendererCursor(renderers) {
+      if (!renderers || renderers.length === 0) {
+        rendererCursor = 0;
+        selectedRendererId = null;
+        return;
+      }
+      const selectedIndex = renderers.findIndex((r) => r.renderer_id === selectedRendererId);
+      if (selectedIndex >= 0) {
+        rendererCursor = selectedIndex;
+        return;
+      }
+      rendererCursor = clampIndex(rendererCursor, renderers.length);
+      selectedRendererId = renderers[rendererCursor].renderer_id;
+    }
+
+    function syncBackendCursor(backends) {
+      if (!backends || backends.length === 0) {
+        backendCursor = 0;
+        selectedBackendId = null;
+        return;
+      }
+      const selectedIndex = backends.findIndex((b) => b.backend_id === selectedBackendId);
+      if (selectedIndex >= 0) {
+        backendCursor = selectedIndex;
+        return;
+      }
+      backendCursor = clampIndex(backendCursor, backends.length);
+    }
+
+    function applyKeyboardFocus() {
+      const rendererCards = Array.from(document.querySelectorAll('#renderers [data-renderer-id]'));
+      const backendCards = Array.from(document.querySelectorAll('#backends [data-backend-id]'));
+      rendererCards.forEach((el) => el.classList.remove('key-focus'));
+      backendCards.forEach((el) => el.classList.remove('key-focus'));
+
+      if (focusedColumn === 'backend') {
+        if (backendCards.length === 0) return;
+        backendCursor = clampIndex(backendCursor, backendCards.length);
+        const target = backendCards[backendCursor];
+        target.classList.add('key-focus');
+        target.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+
+      if (rendererCards.length === 0) return;
+      rendererCursor = clampIndex(rendererCursor, rendererCards.length);
+      const target = rendererCards[rendererCursor];
+      target.classList.add('key-focus');
+      target.scrollIntoView({ block: 'nearest' });
+    }
+
+    function openSelectedBackend() {
+      const backends = currentBackends();
+      if (!backends || backends.length === 0) return;
+      syncBackendCursor(backends);
+      const backend = backends[backendCursor];
+      if (!backend) return;
+
+      selectedBackendId = backend.backend_id;
+      persistSelectionToQuery();
+      render(latestGraph);
+
+      const renderer = rendererById(currentRenderers(), selectedRendererId);
+      const url = rendererUrl(renderer, backend.backend_id);
+      if (!url) return;
+      window.location.href = url;
+    }
+
+    function moveCursor(delta) {
+      if (focusedColumn === 'backend') {
+        const backends = currentBackends();
+        if (!backends || backends.length === 0) return;
+        syncBackendCursor(backends);
+        backendCursor = clampIndex(backendCursor + delta, backends.length);
+        selectedBackendId = backends[backendCursor].backend_id;
+        persistSelectionToQuery();
+        render(latestGraph);
+        return;
+      }
+
+      const renderers = currentRenderers();
+      if (!renderers || renderers.length === 0) return;
+      syncRendererCursor(renderers);
+      rendererCursor = clampIndex(rendererCursor + delta, renderers.length);
+      selectedRendererId = renderers[rendererCursor].renderer_id;
+      persistSelectionToQuery();
+      render(latestGraph);
+    }
+
     function renderRenderers(renderers) {
       const root = document.getElementById('renderers');
       if (!renderers || renderers.length === 0) {
         root.innerHTML = '<div class="empty">No renderers</div>';
-        selectedRendererId = null;
+        syncRendererCursor([]);
+        applyKeyboardFocus();
         return;
       }
 
-      const validSelected = renderers.some((r) => r.renderer_id === selectedRendererId);
-      if (!validSelected) {
-        selectedRendererId = renderers[0].renderer_id;
-      }
+      syncRendererCursor(renderers);
 
       root.innerHTML = renderers.map((r) => {
         const selected = r.renderer_id === selectedRendererId;
@@ -499,6 +627,9 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       root.querySelectorAll('[data-renderer-id]').forEach((el) => {
         el.addEventListener('click', () => {
           selectedRendererId = el.getAttribute('data-renderer-id');
+          const idx = renderers.findIndex((r) => r.renderer_id === selectedRendererId);
+          if (idx >= 0) rendererCursor = idx;
+          focusedColumn = 'renderer';
           persistSelectionToQuery();
           render(latestGraph);
         });
@@ -507,23 +638,25 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
 
     function renderBackends(backends, renderers) {
       const root = document.getElementById('backends');
-      if (selectedBackendId && !backends.some((b) => b.backend_id === selectedBackendId)) {
-        selectedBackendId = null;
-      }
-
       if (!backends || backends.length === 0) {
         root.innerHTML = '<div class="empty">No backends</div>';
+        syncBackendCursor([]);
+        applyKeyboardFocus();
       } else {
+        syncBackendCursor(backends);
         root.innerHTML = backends.map((b) => {
           const selectedRenderer = rendererById(renderers, selectedRendererId);
           const canOpen = Boolean(selectedRenderer && selectedRenderer.port);
           const active = b.backend_id === selectedBackendId;
+          const reachable = b.reachable !== false;
           const selectedClass = active ? ' active-backend' : '';
+          const downClass = reachable ? '' : ' down-backend';
           const disabledClass = canOpen ? '' : ' disabled';
           const targetUrl = canOpen ? rendererUrl(selectedRenderer, b.backend_id) : '#';
-          return '<a class="card' + selectedClass + disabledClass + '" data-backend-id="' + esc(b.backend_id) + '" data-can-open="' + (canOpen ? '1' : '0') + '" href="' + esc(targetUrl) + '">' +
+          const healthLabel = reachable ? '🟢 up' : '🔴 down';
+          return '<a class="card' + selectedClass + downClass + disabledClass + '" data-backend-id="' + esc(b.backend_id) + '" data-can-open="' + (canOpen ? '1' : '0') + '" href="' + esc(targetUrl) + '">' +
             '<div class="title">' + esc(b.backend_id) + '</div>' +
-            '<div class="meta">🔌 :' + esc(backendPortLabel(b)) + ' · 🟢 ' + esc(b.live_connection_count || 0) + ' live</div>' +
+            '<div class="meta">🔌 :' + esc(backendPortLabel(b)) + ' · ' + healthLabel + ' · 🟢 ' + esc(b.live_connection_count || 0) + ' live</div>' +
             '<div class="meta">🌿 ' + esc(b.branch || '-') + ' · 📁 ' + esc(shortPath(b.project_file)) + '</div>' +
           '</a>';
         }).join('');
@@ -535,6 +668,9 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
           const backendId = el.getAttribute('data-backend-id');
           if (!backendId) return;
           selectedBackendId = backendId;
+          const idx = backends.findIndex((b) => b.backend_id === backendId);
+          if (idx >= 0) backendCursor = idx;
+          focusedColumn = 'backend';
           persistSelectionToQuery();
           render(latestGraph);
           const canOpen = el.getAttribute('data-can-open') === '1';
@@ -556,7 +692,57 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       const backends = data.backends || [];
       renderRenderers(renderers);
       renderBackends(backends, renderers);
+      applyKeyboardFocus();
     }
+
+    document.addEventListener('keydown', (event) => {
+      if (isTypingContext()) return;
+
+      const key = event.key;
+      const lower = key.length === 1 ? key.toLowerCase() : key;
+
+      if ((event.ctrlKey || event.metaKey) && lower === 'k') {
+        event.preventDefault();
+        window.location.href = '/graph' + window.location.search;
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && (lower === 'h' || key === 'ArrowLeft')) {
+        event.preventDefault();
+        focusedColumn = 'renderer';
+        applyKeyboardFocus();
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && (lower === 'l' || key === 'ArrowRight')) {
+        event.preventDefault();
+        focusedColumn = 'backend';
+        applyKeyboardFocus();
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && (lower === 'j' || key === 'ArrowDown')) {
+        event.preventDefault();
+        moveCursor(1);
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && (lower === 'k' || key === 'ArrowUp')) {
+        event.preventDefault();
+        moveCursor(-1);
+        return;
+      }
+
+      if (key === 'Enter') {
+        event.preventDefault();
+        if (focusedColumn !== 'backend') {
+          focusedColumn = 'backend';
+          applyKeyboardFocus();
+          return;
+        }
+        openSelectedBackend();
+      }
+    });
 
     async function refresh() {
       try {
@@ -648,6 +834,34 @@ async fn proxy_backend_ws(
 
 fn is_ws_url(ws_url: &str) -> bool {
     ws_url.starts_with("ws://") || ws_url.starts_with("wss://")
+}
+
+async fn detect_backend_reachability(backends: &[BackendEntry]) -> HashMap<String, bool> {
+    let probes = backends.iter().map(|backend| {
+        let backend_id = backend.backend_id.clone();
+        let ws_url = backend.ws_url.clone();
+        async move {
+            let reachable = probe_backend_ws_url(&ws_url).await;
+            (backend_id, reachable)
+        }
+    });
+
+    join_all(probes).await.into_iter().collect()
+}
+
+async fn probe_backend_ws_url(ws_url: &str) -> bool {
+    if !is_ws_url(ws_url) {
+        return false;
+    }
+
+    let connect_result = timeout(Duration::from_millis(700), connect_async(ws_url)).await;
+    match connect_result {
+        Ok(Ok((mut socket, _response))) => {
+            let _ = timeout(Duration::from_millis(150), socket.close(None)).await;
+            true
+        }
+        _ => false,
+    }
 }
 
 async fn load_registry(path: &Path) -> Result<BackendRegistry> {
@@ -839,6 +1053,8 @@ async fn build_graph_response(
         });
     }
 
+    let backend_reachability = detect_backend_reachability(&registry.backends).await;
+
     let mut backends = Vec::new();
     for backend in &registry.backends {
         let agg = backend_agg.remove(&backend.backend_id).unwrap_or_default();
@@ -855,6 +1071,10 @@ async fn build_graph_response(
             systemd_unit: backend_unit_name(&backend.backend_id),
             live_connection_count: agg.count,
             listening_renderer_ids: renderer_ids,
+            reachable: backend_reachability
+                .get(&backend.backend_id)
+                .copied()
+                .unwrap_or(false),
         });
     }
     backends.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));

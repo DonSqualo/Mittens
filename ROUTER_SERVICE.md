@@ -13,13 +13,19 @@ Mittens supports multiple backends and renderers through a single router.
 - Default path: `$HOME/.mittens/backends.json`
 - Override: `MITTENS_REGISTRY_PATH`
 
+No per-branch config files. No per-agent config files.
+
+Project file policy:
+- backend project files must resolve under `~/projects` (enforced by `mittens server on`)
+- files under repo `examples/` are rejected by CLI
+
 Example entry:
 
 ```json
 {
   "backend_id": "a1",
   "ws_url": "ws://127.0.0.1:4201/ws",
-  "project_file": "/abs/path/to/project.lua",
+  "project_file": "/home/heim/projects/example/project.lua",
   "branch": "codex/feature-a1",
   "owner": "dev-a",
   "worktree": "/abs/path/to/worktree",
@@ -42,17 +48,16 @@ Example entry:
 From repo root:
 
 ```bash
-./mittens router start --registry "$HOME/.mittens/backends.json" --port 3100
+./mittens router on --registry "$HOME/.mittens/backends.json" --port 3100
 
-./mittens backend start \
+./mittens server on \
   --backend-id a1 \
-  --project-file examples/pure_acoustics.lua \
-  --projects-root "$PWD" \
+  --project-file /home/heim/projects/pure-acoustics/pure_acoustics.lua \
   --backend-port 4201 \
   --worktree "$PWD" \
   --registry "$HOME/.mittens/backends.json"
 
-./mittens run renderer \
+./mittens renderer on \
   --renderer-id local \
   --worktree "$PWD" \
   --port 3000 \
@@ -62,6 +67,31 @@ From repo root:
 Open:
 
 - `http://localhost:3000/?backend_id=a1`
+
+## Systemd Usage
+
+```bash
+./mittens router systemd on --registry "$HOME/.mittens/backends.json" --port 3100
+./mittens server systemd on \
+  --backend-id a1 \
+  --project-file /home/heim/projects/pure-acoustics/pure_acoustics.lua \
+  --backend-port 4201 \
+  --worktree "$PWD" \
+  --registry "$HOME/.mittens/backends.json"
+./mittens renderer systemd on \
+  --renderer-id local \
+  --worktree "$PWD" \
+  --port 3000 \
+  --host 0.0.0.0
+```
+
+Status and logs:
+
+```bash
+./mittens router systemd status
+./mittens server systemd status --backend-id a1
+./mittens renderer systemd status --renderer-id local
+```
 
 ## Low-Level Binaries
 
