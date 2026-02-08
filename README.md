@@ -150,20 +150,43 @@ local Scene = require("stdlib")
 local register = Scene.register
 local serialize = Scene.serialize
 
-local copper = material("copper")
-local polycarbonate = material("polycarbonate")
+Materials = {
+  Copper = material("copper"),
+  Polycarbonate = material("polycarbonate"),
+}
 
-local housing = difference(
-  cylinder(20, 30):material(polycarbonate),
-  cylinder(15, 30)
+Housing = {
+  outer = { radius = 20, height = 30 },
+  inner = { radius = 15, height = 30 },
+}
+
+Ring = {
+  radius = { inner = 8, outer = 10 },
+  height = 3,
+  position = { x = 0, y = 0, z = 10 },
+}
+
+Probe = {
+  position = { x = 0, y = 0, z = 20 },
+  config = { range = "mT", label = "Bz Probe" },
+}
+
+Housing.model = difference(
+  cylinder(Housing.outer.radius, Housing.outer.height):material(Materials.Polycarbonate),
+  cylinder(Housing.inner.radius, Housing.inner.height)
 ):center("XY")
 
-local coil = ring(8, 10, 3)
-  :material(copper)
-  :at(0, 0, 10)
+Ring.model = ring(Ring.radius.inner, Ring.radius.outer, Ring.height)
+  :material(Materials.Copper)
+  :at(Ring.position.x, Ring.position.y, Ring.position.z)
 
-register(group("assembly", { housing, coil }))
-register(GaussMeter({0, 0, 20}, { range = "mT", label = "Bz Probe" }))
+Assembly = group("assembly", { Housing.model, Ring.model })
+
+register(Assembly)
+register(GaussMeter(
+  { Probe.position.x, Probe.position.y, Probe.position.z },
+  Probe.config
+))
 
 view({
   flat_shading = false,
