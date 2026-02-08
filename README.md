@@ -2,7 +2,8 @@
 
 ## Electronic Lab / Machine Shop / Human Body simulator for Agents and Keyboard Monkeys
 
-![Mittens UI screenshot](screenshot-2026-01-06_14-11-05.png)
+![Mittens UI screenshot 1](screenshot-2026-02-06_19-21-43.png)
+![Mittens UI screenshot 2](screenshot-2026-02-08_14-37-44.png)
 
 Mittens is a script-first CAD and multiphysics environment driven by Lua, a Rust backend, and a WebGPU renderer. It is built for rapid agent-assisted iteration on geometry, field studies, and instrumented experiments.
 
