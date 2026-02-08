@@ -146,20 +146,34 @@ Most shape/group objects support fluent methods:
 ## Minimal Example
 
 ```lua
-local Mittens = require("stdlib")
+local Scene = require("stdlib")
+local register = Scene.register
+local serialize = Scene.serialize
 
-local coil = ring(8, 10, 3):material(material("copper"))
-local body = cylinder(20, 30):material(material("polycarbonate"))
+local copper = material("copper")
+local polycarbonate = material("polycarbonate")
 
-local model = difference(body, cylinder(15, 30))
-  :center("XY")
-  :at(0, 0, 0)
+local housing = difference(
+  cylinder(20, 30):material(polycarbonate),
+  cylinder(15, 30)
+):center("XY")
 
-Mittens.register(group("assembly", { model, coil:at(0, 0, 10) }))
-Mittens.register(GaussMeter({0, 0, 20}, { range = "mT", label = "Bz Probe" }))
-view({ flat_shading = false, camera = { position = {-80, -150, 80}, target = {0, 0, 20} } })
+local coil = ring(8, 10, 3)
+  :material(copper)
+  :at(0, 0, 10)
 
-return Mittens.serialize()
+register(group("assembly", { housing, coil }))
+register(GaussMeter({0, 0, 20}, { range = "mT", label = "Bz Probe" }))
+
+view({
+  flat_shading = false,
+  camera = {
+    position = {-80, -150, 80},
+    target = {0, 0, 20},
+  },
+})
+
+return serialize()
 ```
 
 ## Project Structure
