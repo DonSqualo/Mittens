@@ -1159,6 +1159,7 @@ function update_labels(labels: Label[]) {
 }
 
 // Status HUD (no GPU needed)
+const status_link_el = document.getElementById('status-link') as HTMLAnchorElement | null;
 const status_el = document.getElementById('status')!;
 const status_detail_el = document.getElementById('status-detail')!;
 let last_update_time: Date | null = null;
@@ -1167,6 +1168,30 @@ let last_render_ms = 0;
 
 // Server info (file, branch, port)
 let server_info: { file: string; branch: string; port: number } | null = null;
+const initial_query = new URLSearchParams(window.location.search);
+const current_backend_id = initial_query.get('backend_id') || '';
+const configured_renderer_id = (import.meta.env.VITE_MITTENS_RENDERER_ID as string | undefined)?.trim();
+const configured_renderer_branch = (import.meta.env.VITE_MITTENS_RENDERER_BRANCH as string | undefined)?.trim();
+
+function current_branch_label(): string {
+  if (configured_renderer_branch && configured_renderer_branch.length > 0) {
+    return configured_renderer_branch;
+  }
+  return server_info?.branch || 'unknown';
+}
+
+function update_status_menu_link() {
+  if (!status_link_el) return;
+  const params = new URLSearchParams();
+  if (current_backend_id) {
+    params.set('focus_backend', current_backend_id);
+  }
+  if (configured_renderer_id && configured_renderer_id.length > 0) {
+    params.set('renderer_id', configured_renderer_id);
+  }
+  const suffix = params.toString();
+  status_link_el.href = suffix.length > 0 ? `/graph?${suffix}` : '/graph';
+}
 
 function format_time(date: Date): string {
   return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
@@ -1175,7 +1200,7 @@ function format_time(date: Date): string {
 function update_status_display() {
   if (last_update_time && server_info) {
     const filename = server_info.file.split('/').pop() || server_info.file;
-    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port} · ${format_time(last_update_time)}`;
+    status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()} · ${format_time(last_update_time)}`;
     status_el.style.color = '#0f0';
     status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
   } else if (last_update_time) {
@@ -1192,9 +1217,9 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
     error: '❌',
   };
   if (state === 'connected' && server_info) {
-    // Show file · branch · :port in green
+    // Show file · branch in green
     const filename = server_info.file.split('/').pop() || server_info.file;
-    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port}`;
+    status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()}`;
     status_el.style.color = '#0f0';
   } else if (state !== 'connected' || !last_update_time) {
     status_el.textContent = `${icons[state]} ${state.toUpperCase()}`;
@@ -1209,10 +1234,23 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 
 // WebSocket
 function connect_websocket() {
-  // Use path-based WebSocket routing through nginx
-  const basePath = import.meta.env.BASE_URL || '/';
-  const wsPath = basePath.endsWith('/') ? `${basePath}ws` : `${basePath}/ws`;
-  const ws = new WebSocket(`ws://${window.location.host}${wsPath}`);
+  const backend_id = current_backend_id;
+  const ws_scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  if (!backend_id) {
+    update_status('error', 'Missing backend_id query param');
+    console.error('backend_id query param is required, e.g. ?backend_id=a1');
+    return;
+  }
+  const ws_query = new URLSearchParams();
+  if (configured_renderer_id && configured_renderer_id.length > 0) {
+    ws_query.set('renderer_id', configured_renderer_id);
+  }
+  const ws_query_suffix = ws_query.toString();
+  const ws_path = ws_query_suffix.length > 0
+    ? `/ws/${encodeURIComponent(backend_id)}?${ws_query_suffix}`
+    : `/ws/${encodeURIComponent(backend_id)}`;
+
+  const ws = new WebSocket(`${ws_scheme}://${window.location.host}${ws_path}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -1416,4 +1454,5 @@ document.addEventListener('keydown', (e) => {
 
 // Start
 connect_websocket();
+update_status_menu_link();
 animate();
