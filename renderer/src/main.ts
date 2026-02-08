@@ -1126,6 +1126,14 @@ interface Label {
   z: number;
   size?: number;
   color?: string;
+  ops?: LabelOp[];
+}
+
+interface LabelOp {
+  op: string;
+  x?: number;
+  y?: number;
+  z?: number;
 }
 
 function update_labels(labels: Label[]) {
@@ -1144,12 +1152,46 @@ function update_labels(labels: Label[]) {
     text.color = label.color || 0xffffff;
     text.anchorX = 'center';
     text.anchorY = 'middle';
-    
-    // Position (Mittens uses Z-up, troika uses Y-up by default)
-    text.position.set(label.x, label.y, label.z);
-    
-    // Rotate to lie on XZ plane, readable looking from -Y toward +Y
-    text.rotation.x = Math.PI / 2;  // Flip to face -Y direction
+
+    if (label.ops && label.ops.length > 0) {
+      // Apply the same op sequence as geometry, with default text-facing orientation.
+      const transform = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+
+      for (const op of label.ops) {
+        if (op.op === 'translate') {
+          transform.multiply(new THREE.Matrix4().makeTranslation(
+            op.x || 0,
+            op.y || 0,
+            op.z || 0,
+          ));
+        } else if (op.op === 'rotate') {
+          const rotation = new THREE.Euler(
+            THREE.MathUtils.degToRad(op.x || 0),
+            THREE.MathUtils.degToRad(op.y || 0),
+            THREE.MathUtils.degToRad(op.z || 0),
+            'XYZ'
+          );
+          transform.multiply(new THREE.Matrix4().makeRotationFromEuler(rotation));
+        } else if (op.op === 'scale') {
+          const sx = op.x ?? 1;
+          const sy = op.y ?? sx;
+          const sz = op.z ?? sx;
+          transform.multiply(new THREE.Matrix4().makeScale(sx, sy, sz));
+        }
+      }
+
+      const pos = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const scl = new THREE.Vector3();
+      transform.decompose(pos, quat, scl);
+      text.position.copy(pos);
+      text.quaternion.copy(quat);
+      text.scale.copy(scl);
+    } else {
+      // Backward compatibility for labels produced without op lists.
+      text.position.set(label.x, label.y, label.z);
+      text.rotation.x = Math.PI / 2;
+    }
     
     text.sync();
     labels_group.add(text);
@@ -1159,6 +1201,7 @@ function update_labels(labels: Label[]) {
 }
 
 // Status HUD (no GPU needed)
+const status_link_el = document.getElementById('status-link') as HTMLAnchorElement | null;
 const status_el = document.getElementById('status')!;
 const status_detail_el = document.getElementById('status-detail')!;
 let last_update_time: Date | null = null;
@@ -1167,6 +1210,30 @@ let last_render_ms = 0;
 
 // Server info (file, branch, port)
 let server_info: { file: string; branch: string; port: number } | null = null;
+const initial_query = new URLSearchParams(window.location.search);
+const current_backend_id = initial_query.get('backend_id') || '';
+const configured_renderer_id = (import.meta.env.VITE_MITTENS_RENDERER_ID as string | undefined)?.trim();
+const configured_renderer_branch = (import.meta.env.VITE_MITTENS_RENDERER_BRANCH as string | undefined)?.trim();
+
+function current_branch_label(): string {
+  if (configured_renderer_branch && configured_renderer_branch.length > 0) {
+    return configured_renderer_branch;
+  }
+  return server_info?.branch || 'unknown';
+}
+
+function update_status_menu_link() {
+  if (!status_link_el) return;
+  const params = new URLSearchParams();
+  if (current_backend_id) {
+    params.set('focus_backend', current_backend_id);
+  }
+  if (configured_renderer_id && configured_renderer_id.length > 0) {
+    params.set('renderer_id', configured_renderer_id);
+  }
+  const suffix = params.toString();
+  status_link_el.href = suffix.length > 0 ? `/graph?${suffix}` : '/graph';
+}
 
 function format_time(date: Date): string {
   return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
@@ -1175,7 +1242,7 @@ function format_time(date: Date): string {
 function update_status_display() {
   if (last_update_time && server_info) {
     const filename = server_info.file.split('/').pop() || server_info.file;
-    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port} · ${format_time(last_update_time)}`;
+    status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()} · ${format_time(last_update_time)}`;
     status_el.style.color = '#0f0';
     status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
   } else if (last_update_time) {
@@ -1192,9 +1259,9 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
     error: '❌',
   };
   if (state === 'connected' && server_info) {
-    // Show file · branch · :port in green
+    // Show file · branch in green
     const filename = server_info.file.split('/').pop() || server_info.file;
-    status_el.textContent = `📁 ${filename} · 🌿 ${server_info.branch} · :${server_info.port}`;
+    status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()}`;
     status_el.style.color = '#0f0';
   } else if (state !== 'connected' || !last_update_time) {
     status_el.textContent = `${icons[state]} ${state.toUpperCase()}`;
@@ -1209,10 +1276,23 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
 
 // WebSocket
 function connect_websocket() {
-  // Use path-based WebSocket routing through nginx
-  const basePath = import.meta.env.BASE_URL || '/';
-  const wsPath = basePath.endsWith('/') ? `${basePath}ws` : `${basePath}/ws`;
-  const ws = new WebSocket(`ws://${window.location.host}${wsPath}`);
+  const backend_id = current_backend_id;
+  const ws_scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  if (!backend_id) {
+    update_status('error', 'Missing backend_id query param');
+    console.error('backend_id query param is required, e.g. ?backend_id=a1');
+    return;
+  }
+  const ws_query = new URLSearchParams();
+  if (configured_renderer_id && configured_renderer_id.length > 0) {
+    ws_query.set('renderer_id', configured_renderer_id);
+  }
+  const ws_query_suffix = ws_query.toString();
+  const ws_path = ws_query_suffix.length > 0
+    ? `/ws/${encodeURIComponent(backend_id)}?${ws_query_suffix}`
+    : `/ws/${encodeURIComponent(backend_id)}`;
+
+  const ws = new WebSocket(`${ws_scheme}://${window.location.host}${ws_path}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -1416,4 +1496,5 @@ document.addEventListener('keydown', (e) => {
 
 // Start
 connect_websocket();
+update_status_menu_link();
 animate();

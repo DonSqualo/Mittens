@@ -1050,6 +1050,15 @@ struct Label {
     z: f32,
     size: f32,
     color: String,
+    ops: Vec<LabelOp>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct LabelOp {
+    op: String,
+    x: f32,
+    y: f32,
+    z: f32,
 }
 
 fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Path) -> Result<ProcessResult> {
@@ -1120,7 +1129,22 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                     let z: f32 = label.get("z").unwrap_or(0.0);
                     let size: f32 = label.get("size").unwrap_or(5.0);
                     let color: String = label.get("color").unwrap_or_else(|_| "#ffffff".to_string());
-                    labels.push(Label { text, x, y, z, size, color });
+                    let mut ops: Vec<LabelOp> = Vec::new();
+                    if let Ok(ops_table) = label.get::<_, mlua::Table>("ops") {
+                        for op_item in ops_table.sequence_values::<mlua::Table>() {
+                            if let Ok(op_table) = op_item {
+                                let op: String = op_table.get("op").unwrap_or_default();
+                                if op.is_empty() {
+                                    continue;
+                                }
+                                let x: f32 = op_table.get("x").unwrap_or(0.0);
+                                let y: f32 = op_table.get("y").unwrap_or(0.0);
+                                let z: f32 = op_table.get("z").unwrap_or(0.0);
+                                ops.push(LabelOp { op, x, y, z });
+                            }
+                        }
+                    }
+                    labels.push(Label { text, x, y, z, size, color, ops });
                 }
             }
             info!("Extracted {} labels", labels.len());

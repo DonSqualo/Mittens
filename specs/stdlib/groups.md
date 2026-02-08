@@ -23,9 +23,7 @@ group({shape1, shape2})  -- unnamed
 | `at` | `(x, y, z)` | Translate group |
 | `rotate` | `(rx, ry, rz)` | Rotate group |
 | `scale` | `(sx, [sy], [sz])` | Scale group |
-| `center` | `(cx, cy, cz)` | Center on axes |
-| `centerXY` | `()` | Center on X and Y |
-| `centered` | `()` | Center on all axes |
+| `center` | `("X" | "Y" | "Z" | "XY" | "XZ" | "YZ" | "XYZ")` | Center on selected axes |
 | `material` | `(mat)` | Set material for group |
 | `color` | `(r, g, b, [a])` | Set color for group |
 | `hide` | `()` | Set invisible |
@@ -33,7 +31,7 @@ group({shape1, shape2})  -- unnamed
 | `lock` | `()` | Prevent editing |
 | `unlock` | `()` | Allow editing |
 | `add` | `(child)` | Add child (updates bounds) |
-| `remove` | `(child_or_name)` | Remove child (bounds NOT updated) |
+| `remove` | `(child_or_name)` | Remove child (bounds recalculated) |
 | `find` | `(name)` | Recursive search for named child |
 | `flatten` | `()` | Get all non-group descendants |
 | `serialize` | `()` | Convert to JSON |

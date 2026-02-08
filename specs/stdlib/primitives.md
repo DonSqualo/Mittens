@@ -11,9 +11,7 @@ All primitives return a Shape with these methods:
 | `at` | `(x, y, z)` | Translate shape |
 | `rotate` | `(rx, ry, rz)` | Rotate in degrees |
 | `scale` | `(sx, [sy], [sz])` | Scale (uniform if 1 arg) |
-| `center` | `(cx, cy, cz)` | Center on axes where arg is true |
-| `centerXY` | `()` | Center on X and Y only |
-| `centered` | `()` | Center on all axes |
+| `center` | `("X" | "Y" | "Z" | "XY" | "XZ" | "YZ" | "XYZ")` | Center on selected axes |
 | `material` | `(mat)` | Set material name |
 | `color` | `(r, g, b, [a])` | Set RGBA color (0-1) |
 | `name` | `(n)` | Set object name |
@@ -35,7 +33,7 @@ Creates a box with corner at origin, extending to +w, +d, +h.
 ```lua
 box(10)              -- 10x10x10 cube
 box(20, 10, 5)       -- 20x10x5 box
-box(10):centered()   -- Centered at origin
+box(10):center("XYZ")   -- Centered at origin
 ```
 
 **Validation:** `box(10)` creates bounds `{min={0,0,0}, max={10,10,10}}`
@@ -51,7 +49,7 @@ Creates a cylinder with base on XY plane at Z=0, extending to +h.
 
 ```lua
 cylinder(5, 20)              -- r=5, h=20
-cylinder(5, 20):centered()   -- Center at origin
+cylinder(5, 20):center("XYZ")   -- Center at origin
 ```
 
 **Validation:** `cylinder(5, 20)` creates bounds `{min={-5,-5,0}, max={5,5,20}}`
@@ -103,7 +101,7 @@ Creates a ring (hollow cylinder/tube) centered at origin on XY plane, extending 
 
 ```lua
 ring(8, 10, 15)           -- Tube: 8mm inner, 10mm outer, 15mm tall
-ring(5, 8, 20):centered() -- Centered ring
+ring(5, 8, 20):center("XYZ") -- Centered ring
 ```
 
 **Backend:** `geometry.rs` implements as difference of two cylinders

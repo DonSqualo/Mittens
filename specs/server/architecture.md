@@ -1,6 +1,6 @@
 # Architecture
 
-Technical details for Claude agents working on this codebase.
+Technical details for contributors working on this codebase.
 
 ## System Overview
 
@@ -22,7 +22,7 @@ Technical details for Claude agents working on this codebase.
                                                               │ JSON/WS
                                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                      Renderer (Tauri WebView)                            │
+│                      Renderer (Web Browser / WebView)                    │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                      │
 │  │ Three.js    │  │ Camera      │  │ Mesh        │                      │
 │  │ Scene       │─▶│ Controls    │─▶│ Rendering   │                      │
@@ -55,7 +55,7 @@ Technical details for Claude agents working on this codebase.
 
 **Key files:**
 - `server/src/main.rs` - Server entry, WS handling
-- `server/src/geometry_manifold.rs` - SDF to mesh conversion
+- `server/src/geometry.rs` - SDF to mesh conversion
 - `server/src/export.rs` - STL/3MF writers
 
 ## Lua Execution
@@ -98,7 +98,7 @@ Scripts execute in isolated Lua 5.4 environment with stdlib preloaded.
 
 ## Renderer
 
-Three.js in Tauri webview. Receives triangle meshes (not SDFs).
+Three.js in a browser/WebView. Receives triangle meshes (not SDFs).
 
 **Responsibilities:**
 - Mesh rendering with materials/colors
