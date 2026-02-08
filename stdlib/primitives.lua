@@ -248,8 +248,7 @@ function Primitives.text(text_str, font_size)
     return orig_material(self, mat)
   end
   
-  -- Override serialize to register label with final position
-  local orig_serialize = shape.serialize
+  -- Override serialize to register label with final position + ops
   shape._label_registered = false
   shape.serialize = function(self)
     -- Only register once
@@ -258,7 +257,7 @@ function Primitives.text(text_str, font_size)
     end
     self._label_registered = true
     
-    -- Calculate final position from ops
+    -- Keep a translation-only fallback position for compatibility.
     local x, y, z = 0, 0, 0
     for _, op in ipairs(self._ops) do
       if op.op == "translate" then
@@ -267,10 +266,20 @@ function Primitives.text(text_str, font_size)
         z = z + (op.z or 0)
       end
     end
+
+    local ops = {}
+    for i, op in ipairs(self._ops) do
+      ops[i] = {
+        op = op.op,
+        x = op.x or 0,
+        y = op.y or 0,
+        z = op.z or 0,
+      }
+    end
     
     -- Register the label
     local Mittens = require("stdlib")
-    Mittens.add_label(self._text_str, x, y, z, self._font_size, self._color)
+    Mittens.add_label(self._text_str, x, y, z, self._font_size, self._color, ops)
     
     -- Return empty serialization (no mesh geometry)
     return nil

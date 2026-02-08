@@ -1126,6 +1126,14 @@ interface Label {
   z: number;
   size?: number;
   color?: string;
+  ops?: LabelOp[];
+}
+
+interface LabelOp {
+  op: string;
+  x?: number;
+  y?: number;
+  z?: number;
 }
 
 function update_labels(labels: Label[]) {
@@ -1144,12 +1152,46 @@ function update_labels(labels: Label[]) {
     text.color = label.color || 0xffffff;
     text.anchorX = 'center';
     text.anchorY = 'middle';
-    
-    // Position (Mittens uses Z-up, troika uses Y-up by default)
-    text.position.set(label.x, label.y, label.z);
-    
-    // Rotate to lie on XZ plane, readable looking from -Y toward +Y
-    text.rotation.x = Math.PI / 2;  // Flip to face -Y direction
+
+    if (label.ops && label.ops.length > 0) {
+      // Apply the same op sequence as geometry, with default text-facing orientation.
+      const transform = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+
+      for (const op of label.ops) {
+        if (op.op === 'translate') {
+          transform.multiply(new THREE.Matrix4().makeTranslation(
+            op.x || 0,
+            op.y || 0,
+            op.z || 0,
+          ));
+        } else if (op.op === 'rotate') {
+          const rotation = new THREE.Euler(
+            THREE.MathUtils.degToRad(op.x || 0),
+            THREE.MathUtils.degToRad(op.y || 0),
+            THREE.MathUtils.degToRad(op.z || 0),
+            'XYZ'
+          );
+          transform.multiply(new THREE.Matrix4().makeRotationFromEuler(rotation));
+        } else if (op.op === 'scale') {
+          const sx = op.x ?? 1;
+          const sy = op.y ?? sx;
+          const sz = op.z ?? sx;
+          transform.multiply(new THREE.Matrix4().makeScale(sx, sy, sz));
+        }
+      }
+
+      const pos = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const scl = new THREE.Vector3();
+      transform.decompose(pos, quat, scl);
+      text.position.copy(pos);
+      text.quaternion.copy(quat);
+      text.scale.copy(scl);
+    } else {
+      // Backward compatibility for labels produced without op lists.
+      text.position.set(label.x, label.y, label.z);
+      text.rotation.x = Math.PI / 2;
+    }
     
     text.sync();
     labels_group.add(text);

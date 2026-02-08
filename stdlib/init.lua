@@ -109,14 +109,16 @@ Mittens._labels = {}
 -- @param z Z position
 -- @param size Font size (optional, default 5)
 -- @param color Color string (optional, default white)
-function Mittens.add_label(text, x, y, z, size, color)
+-- @param ops Transform operations (optional)
+function Mittens.add_label(text, x, y, z, size, color, ops)
   table.insert(Mittens._labels, {
     text = text,
     x = x,
     y = y,
     z = z,
     size = size or 5,
-    color = color or "#ffffff"
+    color = color or "#ffffff",
+    ops = ops or {},
   })
 end
 
