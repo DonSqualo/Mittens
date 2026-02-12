@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Text } from 'troika-three-text';
+import { get_shortcut_action } from './keyboardShortcuts';
 
 // Setup
 const canvas = document.getElementById('main-canvas') as HTMLCanvasElement;
@@ -1523,17 +1524,20 @@ function open_graph_menu() {
 }
 
 // Keyboard shortcuts: Ctrl/Cmd+K for graph, H for home
+// Ignore repeated keydown events for "h" to avoid reset spamming while held.
 document.addEventListener('keydown', (e) => {
-  if (is_typing_context()) return;
-  const key = e.key.toLowerCase();
+  const action = get_shortcut_action(
+    { key: e.key, ctrlKey: e.ctrlKey, metaKey: e.metaKey, repeat: e.repeat },
+    is_typing_context()
+  );
 
-  if ((e.ctrlKey || e.metaKey) && key === 'k') {
+  if (action === 'open-graph-menu') {
     e.preventDefault();
     open_graph_menu();
     return;
   }
 
-  if (!e.ctrlKey && !e.metaKey && key === 'h') {
+  if (action === 'reset-camera') {
     reset_camera();
   }
 });

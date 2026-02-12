@@ -1,0 +1,20 @@
+# Progress Log
+Run: bb47842d-00ed-45c4-b69c-5a578db2d84c
+Task: this is a test wheter or not you can make a little change to the renderer also use the CLI to run the server and renderer on this worktree port + 1, serve one of the examples
+Started: 2026-02-12 13:20:00 CET
+
+## Codebase Patterns
+- Renderer keyboard/input behaviors are centralized in `renderer/src/main.ts`; extracting decision logic into small pure helpers under `renderer/src/` makes browser-free unit testing straightforward.
+- Renderer tests can run with Node's built-in test runner using `--experimental-strip-types` for `.ts` test files.
+- `mittens server on` may require `LD_LIBRARY_PATH` to include manifold build outputs in this environment (`server/target/debug/build/manifold3d-sys-*/out/build/{bindings/c,src}`).
+
+---
+
+## 2026-02-12 13:28 CET - US-001: Implement a scoped renderer tweak with automated coverage
+- Implemented a focused keyboard behavior tweak: holding `h` no longer triggers repeated camera resets; reset now occurs once per key press.
+- Extracted shortcut decision logic into `renderer/src/keyboardShortcuts.ts` and wired it into `renderer/src/main.ts`.
+- Added unit tests in `renderer/src/keyboardShortcuts.test.ts` to cover typing context handling, Ctrl/Cmd+K graph shortcut, single `h` reset behavior, repeat suppression, and modifier edge cases.
+- Added renderer `typecheck` and `test` npm scripts; added Node typings and a local declaration for `troika-three-text` to keep typecheck green.
+- Validated CLI runtime by launching renderer on port 3001 and server backend on 4294 against `examples/pure_acoustics.lua`; verified renderer responded at `http://127.0.0.1:3001/?backend_id=us001`.
+- **Learnings:** In this repo's current CLI surface, lifecycle commands are `server on` / `renderer on` (no direct `off`), so teardown may require process cleanup if started in detached mode.
+---
