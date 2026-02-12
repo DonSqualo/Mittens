@@ -85,6 +85,9 @@ const circuit_overlay = document.getElementById('circuit-overlay')!;
 const circuit_anchor = new THREE.Vector3(0, 0, 60); // Anchor point above Z axis
 let circuit_visible = false;
 let circuit_width = 400; // Store circuit width for positioning
+const download_stl_btn = document.getElementById('download-stl-btn') as HTMLButtonElement | null;
+let current_ws: WebSocket | null = null;
+let current_export_files: string[] = [];
 
 // Graph canvas (defined in HTML, hidden by default)
 const graph_canvas = document.getElementById('graph-canvas') as HTMLCanvasElement;
@@ -369,6 +372,53 @@ function create_edge_overlay(geometry: THREE.BufferGeometry): THREE.LineSegments
   const lines = new THREE.LineSegments(wire, mat);
   lines.renderOrder = 10;
   return lines;
+}
+
+function set_download_button_enabled(enabled: boolean) {
+  if (!download_stl_btn) return;
+  download_stl_btn.disabled = !enabled;
+}
+
+function refresh_download_button_state() {
+  set_download_button_enabled(current_export_files.length > 0);
+}
+
+function try_handle_export_packet(buffer: ArrayBuffer): boolean {
+  if (buffer.byteLength < 17) return false;
+  const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 8));
+  if (!magic.startsWith('EXPORT')) return false;
+
+  const view = new DataView(buffer);
+  let offset = 8;
+  const _formatId = view.getUint8(offset); offset += 1;
+  const nameLen = view.getUint32(offset, true); offset += 4;
+  if (buffer.byteLength < offset + nameLen + 4) return true;
+
+  const nameBytes = new Uint8Array(buffer, offset, nameLen);
+  const filename = new TextDecoder().decode(nameBytes);
+  offset += nameLen;
+
+  const payloadLen = view.getUint32(offset, true); offset += 4;
+  if (buffer.byteLength < offset + payloadLen) return true;
+  const payload = buffer.slice(offset, offset + payloadLen);
+
+  const blob = new Blob([payload], {
+    type: filename.toLowerCase().endsWith('.zip') ? 'application/zip' : 'model/stl'
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename || 'exports.zip';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  return true;
+}
+
+function request_export_download() {
+  if (!current_ws || current_ws.readyState !== WebSocket.OPEN) return;
+  current_ws.send(JSON.stringify({ type: 'download_exports' }));
 }
 
 // Plane type constants matching server
@@ -1103,6 +1153,7 @@ function update_mesh(buffer: ArrayBuffer) {
     }
     scene.remove(current_mesh);
     current_mesh = null;
+    refresh_download_button_state();
   }
   if (current_edges) {
     current_edges.geometry.dispose();
@@ -1147,6 +1198,7 @@ function update_mesh(buffer: ArrayBuffer) {
   const material = create_xray_material(flat_shading);
   current_mesh = new THREE.Mesh(result.geometry, material);
   scene.add(current_mesh);
+  refresh_download_button_state();
   if (show_edges) {
     current_edges = create_edge_overlay(result.geometry);
     scene.add(current_edges);
@@ -1328,6 +1380,7 @@ function connect_websocket() {
     : `/ws/${encodeURIComponent(backend_id)}`;
 
   const ws = new WebSocket(`${ws_scheme}://${window.location.host}${ws_path}`);
+  current_ws = ws;
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -1337,6 +1390,7 @@ function connect_websocket() {
 
   ws.onmessage = (event) => {
     if (event.data instanceof ArrayBuffer) {
+      if (try_handle_export_packet(event.data)) return;
       const start = performance.now();
       update_mesh(event.data);
       last_render_ms = performance.now() - start;
@@ -1355,7 +1409,20 @@ function connect_websocket() {
             branch: msg.branch || 'unknown',
             port: msg.port || 0
           };
+          current_export_files = Array.isArray(msg.exports)
+            ? msg.exports.filter((v: unknown) => typeof v === 'string')
+            : [];
+          if (download_stl_btn) {
+            download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
+          }
+          refresh_download_button_state();
           update_status('connected');
+        } else if (msg.type === 'exports' && Array.isArray(msg.files)) {
+          current_export_files = msg.files.filter((v: unknown) => typeof v === 'string');
+          if (download_stl_btn) {
+            download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
+          }
+          refresh_download_button_state();
         }
       } catch (e) {
         console.warn('Failed to parse JSON message:', e);
@@ -1366,6 +1433,9 @@ function connect_websocket() {
   ws.onclose = () => {
     console.log('Disconnected, reconnecting...');
     update_status('disconnected', 'Reconnecting in 2s...');
+    if (current_ws === ws) {
+      current_ws = null;
+    }
     setTimeout(connect_websocket, 2000);
   };
 
@@ -1519,6 +1589,10 @@ function reset_camera() {
 }
 
 home_btn?.addEventListener('click', reset_camera);
+download_stl_btn?.addEventListener('click', () => {
+  request_export_download();
+});
+set_download_button_enabled(false);
 
 function is_typing_context(): boolean {
   const active = document.activeElement;

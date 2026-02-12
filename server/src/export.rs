@@ -2,9 +2,10 @@
 //! Units: millimeters, manifold meshes
 
 use crate::geometry::MeshData;
+use chrono::Local;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::info;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -230,13 +231,14 @@ fn build_model_xml(mesh: &MeshData, units: &str, include_colors: bool) -> String
 
 /// Process exports from the result table using Manifold backend
 /// Supports STL (binary) and 3MF (ZIP with XML, optional colors)
-pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir: &Path) {
+pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir: &Path) -> Vec<String> {
     use crate::geometry;
 
     let exports = match table.get::<_, mlua::Table>("exports") {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return Vec::new(),
     };
+    let mut stl_outputs: Vec<String> = Vec::new();
 
     for pair in exports.pairs::<i32, mlua::Table>() {
         if let Ok((_, exp)) = pair {
@@ -257,10 +259,22 @@ pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir
 
             match format.as_str() {
                 "stl" => {
+                    let output_path = versioned_stl_path(&path);
                     match geometry::generate_mesh_from_object_manifold(lua, &object, circular_segments) {
                         Ok(mesh) => {
-                            if let Err(e) = write_stl(&mesh, &path) {
+                            if let Err(e) = write_stl(&mesh, &output_path) {
                                 tracing::error!("STL export failed for {}: {}", filename, e);
+                            } else {
+                                if let Ok(rel) = output_path.strip_prefix(base_dir) {
+                                    stl_outputs.push(rel.to_string_lossy().to_string());
+                                } else {
+                                    stl_outputs.push(
+                                        output_path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| output_path.to_string_lossy().to_string()),
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
@@ -288,6 +302,17 @@ pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir
             }
         }
     }
+    stl_outputs
+}
+
+fn versioned_stl_path(path: &Path) -> PathBuf {
+    let ts = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "export".to_string());
+    let name = format!("{}_{}.stl", stem, ts);
+    path.with_file_name(name)
 }
 
 // ===========================

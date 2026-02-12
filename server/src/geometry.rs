@@ -2,6 +2,7 @@
 //! Uses manifold3d for guaranteed watertight manifold meshes
 
 use anyhow::{anyhow, Result};
+use crate::thread_primitives::{generate_external_thread, generate_internal_thread};
 use manifold3d::types::{Matrix4x3, PositiveF64, PositiveI32, Vec3};
 use manifold3d::{Manifold, MeshGL};
 use mlua::{Lua, Value};
@@ -309,6 +310,77 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             
             // Generate text mesh
             generate_text_mesh(&text_str, font_size)
+        }
+        "external_thread" => {
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+
+            let (vert_props, tri_verts) = generate_external_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+            );
+
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+
+            Ok(result)
+        }
+        "internal_thread" => {
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize = params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+            let thread_depth = 0.54125 * pitch;
+            let wall_thickness: f64 = params
+                .get::<_, f64>("wall_thickness")
+                .unwrap_or(thread_depth * 5.0);
+
+            let (vert_props, tri_verts) = generate_internal_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+                wall_thickness,
+            );
+
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+
+            Ok(result)
         }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }
