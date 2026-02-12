@@ -1336,7 +1336,7 @@ fn renderer_unit_name(renderer_id: &str) -> String {
 }
 
 fn sanitize_unit_id(value: &str) -> String {
-    let base: String = value
+    value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '@' | '-') {
@@ -1345,8 +1345,7 @@ fn sanitize_unit_id(value: &str) -> String {
                 '_'
             }
         })
-        .collect();
-    format!("{base}_")
+        .collect()
 }
 
 fn systemd_user_dir() -> PathBuf {

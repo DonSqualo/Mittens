@@ -300,9 +300,12 @@ Mittens.register(transducer_circuit)
 -- ============================================================================
 
 view({
-  camera = "isometric",
+  camera = {
+    position = { -80, -150, 80 },
+    target = { 0, 0, PolyTube.height / 2 },
+    projection = "perspective",
+  },
   distance = 150,
-  target = { 0, 0, PolyTube.height / 2 },
   theme = "dark",
   axes = { show = true, size = 20 },
 })

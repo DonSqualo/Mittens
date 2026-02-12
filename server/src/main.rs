@@ -157,10 +157,11 @@ struct CameraState {
     far: f32,
 }
 
-fn serialize_view_config(flat_shading: bool, camera: Option<CameraState>) -> Vec<u8> {
-    let mut data = Vec::with_capacity(48);
+fn serialize_view_config(flat_shading: bool, show_edges: bool, camera: Option<CameraState>) -> Vec<u8> {
+    let mut data = Vec::with_capacity(49);
     data.extend_from_slice(b"VIEW\0\0\0\0");
     data.push(if flat_shading { 1 } else { 0 });
+    data.push(if show_edges { 1 } else { 0 });
 
     match camera {
         Some(cam) => {
@@ -206,7 +207,7 @@ fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mps
         match process_single_file(&lua, &content, base_dir) {
             Ok(result) => {
                 // Send view config first
-                let view_binary = serialize_view_config(result.flat_shading, result.camera);
+                let view_binary = serialize_view_config(result.flat_shading, result.show_edges, result.camera);
                 let _ = tx.send(view_binary);
 
                 let binary = result.mesh.to_binary();
@@ -1036,6 +1037,7 @@ fn try_generate_circuit(lua: &mlua::Lua, content: &str) -> Option<circuit::Circu
 struct ProcessResult {
     mesh: geometry::MeshData,
     flat_shading: bool,
+    show_edges: bool,
     #[allow(dead_code)]
     circular_segments: u32,
     camera: Option<CameraState>,
@@ -1071,9 +1073,10 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
     let result: mlua::Value = lua.load(content).eval()?;
 
     // Extract view config
-    let (flat_shading, circular_segments, camera) = if let Some(table) = result.as_table() {
+    let (flat_shading, show_edges, circular_segments, camera) = if let Some(table) = result.as_table() {
         if let Ok(view) = table.get::<_, mlua::Table>("view") {
             let flat = view.get::<_, bool>("flat_shading").unwrap_or(false);
+            let edges = view.get::<_, bool>("show_edges").unwrap_or(false);
             let segments = view.get::<_, u32>("circular_segments").unwrap_or(32);
 
             let cam = if let Ok(cam_table) = view.get::<_, mlua::Table>("camera") {
@@ -1102,12 +1105,12 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                 None
             };
 
-            (flat, segments, cam)
+            (flat, edges, segments, cam)
         } else {
-            (false, 32, None)
+            (false, false, 32, None)
         }
     } else {
-        (false, 32, None)
+        (false, false, 32, None)
     };
 
     info!("Using Manifold backend for CSG, circular_segments={}", circular_segments);
@@ -1156,7 +1159,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         Vec::new()
     };
 
-    Ok(ProcessResult { mesh, flat_shading, circular_segments, camera, labels })
+    Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels })
 }
 
 async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>) {

@@ -68,6 +68,7 @@ let current_edges: THREE.LineSegments | null = null;
 let arrows_group: THREE.Group | null = null;
 let field_plane: THREE.Mesh | null = null;
 let flat_shading: boolean = true;
+let show_edges: boolean = false;
 
 // 3D text labels (troika-three-text)
 let labels_group: THREE.Group = new THREE.Group();
@@ -978,19 +979,27 @@ function update_mesh(buffer: ArrayBuffer) {
   // Handle view config
   if (header_8.startsWith('VIEW')) {
     const view = new DataView(buffer);
-    flat_shading = view.getUint8(8) === 1;
-    const has_camera = view.getUint8(9) === 1;
+    let offset = 8;
+    flat_shading = view.getUint8(offset) === 1;
+    offset += 1;
 
-    if (has_camera && buffer.byteLength >= 46) {
-      const cam_x = view.getFloat32(10, true);
-      const cam_y = view.getFloat32(14, true);
-      const cam_z = view.getFloat32(18, true);
-      const tgt_x = view.getFloat32(22, true);
-      const tgt_y = view.getFloat32(26, true);
-      const tgt_z = view.getFloat32(30, true);
-      const fov = view.getFloat32(34, true);
-      const near = view.getFloat32(38, true);
-      const far = view.getFloat32(42, true);
+    // VIEW packet format: [flat_shading][show_edges][has_camera]
+    let has_camera = false;
+    show_edges = view.getUint8(offset) === 1;
+    offset += 1;
+    has_camera = view.getUint8(offset) === 1;
+    offset += 1;
+
+    if (has_camera && buffer.byteLength >= offset + 36) {
+      const cam_x = view.getFloat32(offset, true); offset += 4;
+      const cam_y = view.getFloat32(offset, true); offset += 4;
+      const cam_z = view.getFloat32(offset, true); offset += 4;
+      const tgt_x = view.getFloat32(offset, true); offset += 4;
+      const tgt_y = view.getFloat32(offset, true); offset += 4;
+      const tgt_z = view.getFloat32(offset, true); offset += 4;
+      const fov = view.getFloat32(offset, true); offset += 4;
+      const near = view.getFloat32(offset, true); offset += 4;
+      const far = view.getFloat32(offset, true);
 
       console.log(`[VIEW] Received: near=${near}, far=${far}, fov=${fov}`);
 
@@ -1010,12 +1019,12 @@ function update_mesh(buffer: ArrayBuffer) {
         last_lua_camera_key = lua_key;
         // Clear localStorage when Lua explicitly sets camera
         localStorage.removeItem('mittens_camera');
-        console.log(`View config: flat_shading=${flat_shading}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}, near=${near}, far=${far}`);
+        console.log(`View config: flat_shading=${flat_shading}, show_edges=${show_edges}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}, near=${near}, far=${far}`);
       } else {
-        console.log(`View config: flat_shading=${flat_shading}, camera unchanged (keeping user position)`);
+        console.log(`View config: flat_shading=${flat_shading}, show_edges=${show_edges}, camera unchanged (keeping user position)`);
       }
     } else {
-      console.log(`View config: flat_shading=${flat_shading}, no camera specified`);
+      console.log(`View config: flat_shading=${flat_shading}, show_edges=${show_edges}, no camera specified`);
     }
     return;
   }
@@ -1138,8 +1147,10 @@ function update_mesh(buffer: ArrayBuffer) {
   const material = create_xray_material(flat_shading);
   current_mesh = new THREE.Mesh(result.geometry, material);
   scene.add(current_mesh);
-  current_edges = create_edge_overlay(result.geometry);
-  scene.add(current_edges);
+  if (show_edges) {
+    current_edges = create_edge_overlay(result.geometry);
+    scene.add(current_edges);
+  }
 }
 
 // Update 3D text labels

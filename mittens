@@ -19,6 +19,8 @@ usage() {
   cat <<'EOF'
 Usage:
   # Canonical surface:
+  mittens init PROJECT.lua [--backend-id ID] [--projects-root PATH] [--worktree PATH] [--registry PATH] [--router-port N] [--renderer-id ID] [--renderer-port N] [--renderer-host HOST] [--backend-port N] [--owner NAME] [--branch NAME] [--nginx-snippet-output FILE] [--nginx-service NAME] [--no-nginx]
+
   mittens router on [--registry PATH] [--port N] [--log FILE] [--pid-file FILE]
   mittens router systemd on [--registry PATH] [--port N]
   mittens router systemd off
@@ -190,7 +192,155 @@ require_no_whitespace() {
 
 sanitize_unit_id() {
   local value="$1"
-  echo "$value" | tr -c 'A-Za-z0-9_.@-' '_'
+  printf "%s" "$value" | tr -c 'A-Za-z0-9_.@-' '_'
+}
+
+default_backend_id_from_project() {
+  local project_file="$1"
+  local base
+  base="$(basename "$project_file")"
+  base="${base%.lua}"
+  sanitize_unit_id "$base"
+}
+
+manifold_ld_library_path_for_worktree() {
+  local worktree="$1"
+  local bindings_dir
+  local src_dir
+  bindings_dir="$(ls -d "$worktree"/server/target/release/build/manifold3d-sys-*/out/build/bindings/c 2>/dev/null | head -n 1 || true)"
+  src_dir="$(ls -d "$worktree"/server/target/release/build/manifold3d-sys-*/out/build/src 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$bindings_dir" || -z "$src_dir" ]]; then
+    return 1
+  fi
+  echo "$bindings_dir:$src_dir"
+}
+
+set_backend_unit_ld_library_path() {
+  local backend_id="$1"
+  local worktree="$2"
+  local unit_path
+  unit_path="$(systemd_backend_unit_path "$backend_id")"
+  [[ -f "$unit_path" ]] || die "backend unit file not found: $unit_path"
+
+  local ld_path
+  ld_path="$(manifold_ld_library_path_for_worktree "$worktree" || true)"
+  [[ -n "$ld_path" ]] || die "could not resolve manifold runtime library paths under '$worktree/server/target/release/build'"
+
+  if grep -q '^Environment=LD_LIBRARY_PATH=' "$unit_path"; then
+    sed -i "s|^Environment=LD_LIBRARY_PATH=.*|Environment=LD_LIBRARY_PATH=$ld_path|" "$unit_path"
+  else
+    awk -v line="Environment=LD_LIBRARY_PATH=$ld_path" '
+      {
+        print $0
+        if ($0 ~ /^Environment=PATH=/) {
+          print line
+        }
+      }
+    ' "$unit_path" >"$unit_path.tmp"
+    mv "$unit_path.tmp" "$unit_path"
+  fi
+}
+
+enable_nginx_service() {
+  local service_name="$1"
+  command -v nginx >/dev/null 2>&1 || die "nginx binary not found in PATH (install nginx or run init with --no-nginx)"
+  command -v systemctl >/dev/null 2>&1 || die "systemctl not found (run init with --no-nginx on non-systemd environments)"
+  systemctl enable --now "$service_name" >/dev/null 2>&1 || die "failed to enable/start nginx service '$service_name' (try running with appropriate privileges)"
+  systemctl reload "$service_name" >/dev/null 2>&1 || systemctl restart "$service_name" >/dev/null 2>&1 || die "failed to reload/restart nginx service '$service_name'"
+}
+
+init_cmd() {
+  local project_file=""
+  local backend_id=""
+  local projects_root="$REPO_ROOT"
+  local worktree="$REPO_ROOT"
+  local registry_path="$DEFAULT_REGISTRY_PATH"
+  local router_port="$DEFAULT_ROUTER_PORT"
+  local renderer_id="local"
+  local renderer_port="3000"
+  local renderer_host="$DEFAULT_RENDERER_HOST"
+  local backend_port=""
+  local owner="${USER:-unknown}"
+  local branch=""
+  local nginx_snippet_output="${HOME:-/tmp}/.mittens/nginx/mittens-router.conf"
+  local nginx_service="nginx"
+  local enable_nginx="1"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --backend-id) backend_id="${2:-}"; shift 2 ;;
+      --projects-root) projects_root="${2:-}"; shift 2 ;;
+      --worktree) worktree="${2:-}"; shift 2 ;;
+      --registry) registry_path="${2:-}"; shift 2 ;;
+      --router-port) router_port="${2:-}"; shift 2 ;;
+      --renderer-id) renderer_id="${2:-}"; shift 2 ;;
+      --renderer-port) renderer_port="${2:-}"; shift 2 ;;
+      --renderer-host) renderer_host="${2:-}"; shift 2 ;;
+      --backend-port) backend_port="${2:-}"; shift 2 ;;
+      --owner) owner="${2:-}"; shift 2 ;;
+      --branch) branch="${2:-}"; shift 2 ;;
+      --nginx-snippet-output) nginx_snippet_output="${2:-}"; shift 2 ;;
+      --nginx-service) nginx_service="${2:-}"; shift 2 ;;
+      --no-nginx) enable_nginx="0"; shift ;;
+      --*)
+        die "unknown init flag '$1'"
+        ;;
+      *)
+        if [[ -z "$project_file" ]]; then
+          project_file="$1"
+        else
+          die "unexpected positional argument '$1' (expected only PROJECT.lua)"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$project_file" ]] || die "missing required PROJECT.lua argument"
+  [[ -n "$backend_id" ]] || backend_id="$(default_backend_id_from_project "$project_file")"
+  [[ -n "$backend_port" ]] || backend_port="$(default_backend_port_from_id "$backend_id")"
+  project_file="$(resolve_project_file "$project_file" "$projects_root")"
+  systemd_require_user
+
+  # Migrate from old unit naming behavior that could append an extra underscore.
+  cleanup_legacy_renderer_unit "$renderer_id"
+  cleanup_legacy_backend_unit "$backend_id"
+  systemctl --user daemon-reload
+
+  echo "init: router systemd on (port=$router_port)"
+  systemd_router_install --registry "$registry_path" --port "$router_port"
+
+  echo "init: renderer systemd on (id=$renderer_id port=$renderer_port)"
+  systemd_renderer_install --renderer-id "$renderer_id" --worktree "$worktree" --port "$renderer_port" --host "$renderer_host"
+
+  echo "init: backend systemd on (id=$backend_id port=$backend_port project=$project_file)"
+  systemd_backend_install \
+    --backend-id "$backend_id" \
+    --project-file "$project_file" \
+    --projects-root "$projects_root" \
+    --backend-port "$backend_port" \
+    --worktree "$worktree" \
+    --owner "$owner" \
+    --branch "$branch" \
+    --registry "$registry_path"
+
+  set_backend_unit_ld_library_path "$backend_id" "$worktree"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$(systemd_backend_unit_name "$backend_id")" >/dev/null 2>&1 || true
+  systemctl --user restart "$(systemd_backend_unit_name "$backend_id")"
+  systemctl --user restart "mittens-router.service"
+
+  mkdir -p "$(dirname "$nginx_snippet_output")"
+  nginx_snippet --router-port "$router_port" --output "$nginx_snippet_output"
+  if [[ "$enable_nginx" == "1" ]]; then
+    enable_nginx_service "$nginx_service"
+    echo "init: nginx enabled and reloaded (service=$nginx_service)"
+  else
+    echo "init: nginx skipped (--no-nginx)"
+  fi
+
+  echo "init complete"
+  echo "open: http://localhost:${renderer_port}/?backend_id=${backend_id}"
 }
 
 ensure_renderer_deps_for_worktree() {
@@ -638,6 +788,35 @@ systemd_renderer_unit_path() {
   echo "$DEFAULT_SYSTEMD_USER_DIR/$(systemd_renderer_unit_name "$renderer_id")"
 }
 
+systemd_disable_and_remove_unit() {
+  local unit_name="$1"
+  local unit_path="$DEFAULT_SYSTEMD_USER_DIR/$unit_name"
+  systemctl --user disable --now "$unit_name" >/dev/null 2>&1 || true
+  rm -f "$unit_path"
+}
+
+cleanup_legacy_backend_unit() {
+  local backend_id="$1"
+  local current_unit
+  current_unit="$(systemd_backend_unit_name "$backend_id")"
+  local legacy_unit
+  legacy_unit="$(systemd_backend_unit_name "${backend_id}_")"
+  if [[ "$legacy_unit" != "$current_unit" ]]; then
+    systemd_disable_and_remove_unit "$legacy_unit"
+  fi
+}
+
+cleanup_legacy_renderer_unit() {
+  local renderer_id="$1"
+  local current_unit
+  current_unit="$(systemd_renderer_unit_name "$renderer_id")"
+  local legacy_unit
+  legacy_unit="$(systemd_renderer_unit_name "${renderer_id}_")"
+  if [[ "$legacy_unit" != "$current_unit" ]]; then
+    systemd_disable_and_remove_unit "$legacy_unit"
+  fi
+}
+
 systemd_router_install() {
   local -A flags
   parse_flags flags "$@"
@@ -920,6 +1099,9 @@ main() {
   case "$category" in
     help|-h|--help)
       usage
+      ;;
+    init)
+      init_cmd "$@"
       ;;
     router)
       local action="${1:-}"

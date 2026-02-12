@@ -31,6 +31,7 @@ View._state = {
   render = {
     flat_shading = false,
     circular_segments = 32,
+    show_edges = false,
   }
 }
 
@@ -126,6 +127,9 @@ function View.view(config)
   end
   if config.circular_segments ~= nil then
     View._state.render.circular_segments = config.circular_segments
+  end
+  if config.show_edges ~= nil then
+    View._state.render.show_edges = config.show_edges
   end
 
   return View._state
@@ -235,6 +239,7 @@ function View.serialize()
   return {
     flat_shading = View._state.render.flat_shading,
     circular_segments = View._state.render.circular_segments,
+    show_edges = View._state.render.show_edges,
     camera = {
       position = View._state.camera.position,
       target = View._state.camera.target,
@@ -272,7 +277,7 @@ function View.reset()
     theme = "dark",
     grid = {show = true, size = 100, divisions = 10},
     axes = {show = true, size = 20},
-    render = {flat_shading = false, circular_segments = 32}
+    render = {flat_shading = false, circular_segments = 32, show_edges = false}
   }
 end
 
