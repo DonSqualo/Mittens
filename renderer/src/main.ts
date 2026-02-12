@@ -380,77 +380,7 @@ function set_download_button_enabled(enabled: boolean) {
 }
 
 function refresh_download_button_state() {
-  set_download_button_enabled(Boolean(current_mesh) || current_export_files.length > 0);
-}
-
-function build_binary_stl(mesh: THREE.Mesh): Blob {
-  const geometry = mesh.geometry as THREE.BufferGeometry;
-  const position = geometry.getAttribute('position') as THREE.BufferAttribute;
-  const index = geometry.getIndex();
-  const triangle_count = index ? index.count / 3 : position.count / 3;
-
-  const buffer = new ArrayBuffer(84 + triangle_count * 50);
-  const view = new DataView(buffer);
-  view.setUint32(80, triangle_count, true);
-
-  const a = new THREE.Vector3();
-  const b = new THREE.Vector3();
-  const c = new THREE.Vector3();
-  const ab = new THREE.Vector3();
-  const ac = new THREE.Vector3();
-  const normal = new THREE.Vector3();
-  const mesh_world = mesh.matrixWorld;
-
-  let offset = 84;
-  for (let t = 0; t < triangle_count; t++) {
-    const i0 = index ? index.getX(t * 3) : t * 3;
-    const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
-    const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
-
-    a.fromBufferAttribute(position, i0).applyMatrix4(mesh_world);
-    b.fromBufferAttribute(position, i1).applyMatrix4(mesh_world);
-    c.fromBufferAttribute(position, i2).applyMatrix4(mesh_world);
-
-    ab.subVectors(b, a);
-    ac.subVectors(c, a);
-    normal.crossVectors(ab, ac).normalize();
-
-    view.setFloat32(offset, normal.x, true); offset += 4;
-    view.setFloat32(offset, normal.y, true); offset += 4;
-    view.setFloat32(offset, normal.z, true); offset += 4;
-
-    view.setFloat32(offset, a.x, true); offset += 4;
-    view.setFloat32(offset, a.y, true); offset += 4;
-    view.setFloat32(offset, a.z, true); offset += 4;
-
-    view.setFloat32(offset, b.x, true); offset += 4;
-    view.setFloat32(offset, b.y, true); offset += 4;
-    view.setFloat32(offset, b.z, true); offset += 4;
-
-    view.setFloat32(offset, c.x, true); offset += 4;
-    view.setFloat32(offset, c.y, true); offset += 4;
-    view.setFloat32(offset, c.z, true); offset += 4;
-
-    view.setUint16(offset, 0, true); offset += 2;
-  }
-
-  return new Blob([buffer], { type: 'model/stl' });
-}
-
-function download_current_mesh_stl() {
-  if (!current_mesh) return;
-
-  const base = server_info?.file ? (server_info.file.split('/').pop() || 'mesh') : 'mesh';
-  const filename = base.replace(/\.lua$/i, '') + '.stl';
-  const blob = build_binary_stl(current_mesh);
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  set_download_button_enabled(current_export_files.length > 0);
 }
 
 function try_handle_export_packet(buffer: ArrayBuffer): boolean {
@@ -1660,11 +1590,7 @@ function reset_camera() {
 
 home_btn?.addEventListener('click', reset_camera);
 download_stl_btn?.addEventListener('click', () => {
-  if (current_export_files.length > 0) {
-    request_export_download();
-    return;
-  }
-  download_current_mesh_stl();
+  request_export_download();
 });
 set_download_button_enabled(false);
 

@@ -1146,8 +1146,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
     let mesh = geometry::generate_mesh_from_lua_manifold(lua, &result, circular_segments)?;
 
     let exports = if let Some(table) = result.as_table() {
-        export::process_exports_from_table(lua, table, base_dir);
-        extract_stl_export_filenames(table)
+        export::process_exports_from_table(lua, table, base_dir)
     } else {
         Vec::new()
     };
@@ -1196,31 +1195,6 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
     };
 
     Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels, exports })
-}
-
-fn extract_stl_export_filenames(table: &mlua::Table) -> Vec<String> {
-    let exports = match table.get::<_, mlua::Table>("exports") {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut out = Vec::new();
-    for pair in exports.pairs::<i32, mlua::Table>() {
-        let (_, exp) = match pair {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let format: String = exp.get("format").unwrap_or_default();
-        if !format.eq_ignore_ascii_case("stl") {
-            continue;
-        }
-        let filename: String = exp.get("filename").unwrap_or_default();
-        if filename.is_empty() {
-            continue;
-        }
-        out.push(filename);
-    }
-    out
 }
 
 async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>) {
