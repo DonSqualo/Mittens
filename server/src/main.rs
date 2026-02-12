@@ -27,6 +27,7 @@ mod export;
 mod field;
 mod geometry;
 mod nanovna;
+mod thread_primitives;
 
 struct AppState {
     mesh_tx: broadcast::Sender<Vec<u8>>,
