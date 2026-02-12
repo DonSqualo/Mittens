@@ -118,6 +118,33 @@
       background: rgba(0, 40, 0, 0.25);
     }
 
+    .download-stl-btn {
+      position: absolute;
+      right: 12px;
+      bottom: 10px;
+      z-index: 140;
+      border: 1px solid #0a5;
+      background: rgba(0, 35, 0, 0.5);
+      color: #9f9;
+      font-size: 10px;
+      font-family: 'Courier New', Consolas, monospace;
+      letter-spacing: 1px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    .download-stl-btn:hover {
+      background: rgba(0, 60, 0, 0.65);
+      color: #cfc;
+    }
+
+    .download-stl-btn:disabled {
+      border-color: #444;
+      color: #666;
+      background: rgba(20, 20, 20, 0.5);
+      cursor: not-allowed;
+    }
+
     #graph-window {
       bottom: 20px;
       right: 20px;
@@ -184,6 +211,7 @@
       <div class="tui-status" id="status-detail" style="color: #555; font-size: 9px;"></div>
       <div class="tui-status" id="status">⏳ CONNECTING...</div>
     </a>
+    <button id="download-stl-btn" class="download-stl-btn" title="Download current mesh as STL" disabled>STL</button>
     <div id="circuit-overlay"></div>
     
     <!-- Camera HUD -->

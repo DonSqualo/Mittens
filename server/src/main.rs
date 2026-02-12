@@ -16,10 +16,12 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{io::Write, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
+use zip::write::SimpleFileOptions;
+use zip::ZipWriter;
 
 mod acoustic;
 mod circuit;
@@ -32,11 +34,13 @@ mod thread_primitives;
 struct AppState {
     mesh_tx: broadcast::Sender<Vec<u8>>,
     labels_tx: broadcast::Sender<String>,
+    exports_tx: broadcast::Sender<String>,
     current_mesh: RwLock<Option<Vec<u8>>>,
     current_field: RwLock<Option<Vec<u8>>>,
     current_circuit: RwLock<Option<Vec<u8>>>,
     current_nanovna: RwLock<Option<Vec<u8>>>,
     current_labels: RwLock<Option<String>>,
+    current_exports: RwLock<Vec<String>>,
     watched_file: String,
     git_branch: String,
     port: u16,
@@ -69,24 +73,29 @@ async fn main() -> Result<()> {
 
     let (mesh_tx, _) = broadcast::channel::<Vec<u8>>(16);
     let (labels_tx, _) = broadcast::channel::<String>(16);
+    let (exports_tx, _) = broadcast::channel::<String>(16);
     let (lua_tx, lua_rx) = mpsc::unbounded_channel::<(String, PathBuf)>();
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (labels_result_tx, mut labels_result_rx) = mpsc::unbounded_channel::<String>();
+    let (exports_result_tx, mut exports_result_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
     // Lua processing thread (Manifold needs to run on same thread)
     let labels_tx_clone = labels_result_tx.clone();
+    let exports_tx_clone = exports_result_tx.clone();
     thread::spawn(move || {
-        process_lua_files(lua_rx, result_tx, labels_tx_clone);
+        process_lua_files(lua_rx, result_tx, labels_tx_clone, exports_tx_clone);
     });
 
     let state = Arc::new(AppState {
         mesh_tx: mesh_tx.clone(),
         labels_tx: labels_tx.clone(),
+        exports_tx: exports_tx.clone(),
         current_mesh: RwLock::new(None),
         current_field: RwLock::new(None),
         current_circuit: RwLock::new(None),
         current_nanovna: RwLock::new(None),
         current_labels: RwLock::new(None),
+        current_exports: RwLock::new(Vec::new()),
         watched_file: file_path.display().to_string(),
         git_branch,
         port,
@@ -119,6 +128,18 @@ async fn main() -> Result<()> {
         while let Some(labels_json) = labels_result_rx.recv().await {
             *state_clone.current_labels.write().await = Some(labels_json.clone());
             let _ = state_clone.labels_tx.send(labels_json);
+        }
+    });
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        while let Some(exports) = exports_result_rx.recv().await {
+            *state_clone.current_exports.write().await = exports.clone();
+            let exports_json = serde_json::json!({
+                "type": "exports",
+                "files": exports
+            });
+            let _ = state_clone.exports_tx.send(exports_json.to_string());
         }
     });
 
@@ -185,7 +206,12 @@ fn serialize_view_config(flat_shading: bool, show_edges: bool, camera: Option<Ca
     data
 }
 
-fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mpsc::UnboundedSender<Vec<u8>>, labels_tx: mpsc::UnboundedSender<String>) {
+fn process_lua_files(
+    mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    labels_tx: mpsc::UnboundedSender<String>,
+    exports_tx: mpsc::UnboundedSender<Vec<String>>,
+) {
     let lua = mlua::Lua::new();
 
     // Set up package path to include stdlib directory
@@ -220,6 +246,7 @@ fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mps
                     result.flat_shading
                 );
                 let _ = tx.send(binary);
+                let _ = exports_tx.send(result.exports.clone());
 
                 // Send labels as JSON if any
                 if !result.labels.is_empty() {
@@ -1043,6 +1070,7 @@ struct ProcessResult {
     circular_segments: u32,
     camera: Option<CameraState>,
     labels: Vec<Label>,
+    exports: Vec<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1117,8 +1145,15 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
     info!("Using Manifold backend for CSG, circular_segments={}", circular_segments);
     let mesh = geometry::generate_mesh_from_lua_manifold(lua, &result, circular_segments)?;
 
-    if let Some(table) = result.as_table() {
+    let exports = if let Some(table) = result.as_table() {
         export::process_exports_from_table(lua, table, base_dir);
+        extract_stl_export_filenames(table)
+    } else {
+        Vec::new()
+    };
+
+    if !exports.is_empty() {
+        info!("Detected {} STL export(s): {:?}", exports.len(), exports);
     }
 
     // Extract labels
@@ -1160,7 +1195,32 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         Vec::new()
     };
 
-    Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels })
+    Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels, exports })
+}
+
+fn extract_stl_export_filenames(table: &mlua::Table) -> Vec<String> {
+    let exports = match table.get::<_, mlua::Table>("exports") {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for pair in exports.pairs::<i32, mlua::Table>() {
+        let (_, exp) = match pair {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let format: String = exp.get("format").unwrap_or_default();
+        if !format.eq_ignore_ascii_case("stl") {
+            continue;
+        }
+        let filename: String = exp.get("filename").unwrap_or_default();
+        if filename.is_empty() {
+            continue;
+        }
+        out.push(filename);
+    }
+    out
 }
 
 async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>) {
@@ -1194,17 +1254,89 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
+fn collect_export_stl_files(watched_file: &str, exports: &[String]) -> Vec<PathBuf> {
+    let base_dir = PathBuf::from(watched_file)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let base_canon = std::fs::canonicalize(&base_dir).unwrap_or(base_dir.clone());
+
+    let mut files = Vec::new();
+    for rel in exports {
+        if !rel.to_ascii_lowercase().ends_with(".stl") {
+            continue;
+        }
+        let candidate = base_dir.join(&rel);
+        let candidate_canon = match std::fs::canonicalize(&candidate) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !candidate_canon.starts_with(&base_canon) || !candidate_canon.is_file() {
+            continue;
+        }
+        files.push(candidate_canon);
+    }
+    files
+}
+
+fn build_export_packet(watched_file: &str, exports: &[String]) -> Option<Vec<u8>> {
+    let stl_files = collect_export_stl_files(watched_file, exports);
+    if stl_files.is_empty() {
+        return None;
+    }
+
+    let (format_id, filename, payload) = if stl_files.len() == 1 {
+        let path = &stl_files[0];
+        let data = std::fs::read(path).ok()?;
+        let name = path.file_name()?.to_string_lossy().to_string();
+        (1u8, name, data)
+    } else {
+        let mut zip_buf = std::io::Cursor::new(Vec::<u8>::new());
+        {
+            let mut zip = ZipWriter::new(&mut zip_buf);
+            let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            for path in &stl_files {
+                let name = path.file_name()?.to_string_lossy().to_string();
+                let data = std::fs::read(path).ok()?;
+                if zip.start_file(name, options).is_err() {
+                    return None;
+                }
+                if zip.write_all(&data).is_err() {
+                    return None;
+                }
+            }
+            if zip.finish().is_err() {
+                return None;
+            }
+        }
+        (2u8, "exports.zip".to_string(), zip_buf.into_inner())
+    };
+
+    let name_bytes = filename.as_bytes();
+    let mut packet = Vec::with_capacity(8 + 1 + 4 + name_bytes.len() + 4 + payload.len());
+    packet.extend_from_slice(b"EXPORT\0\0");
+    packet.push(format_id);
+    packet.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+    packet.extend_from_slice(name_bytes);
+    packet.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    packet.extend_from_slice(&payload);
+    Some(packet)
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.mesh_tx.subscribe();
     let mut labels_rx = state.labels_tx.subscribe();
+    let mut exports_rx = state.exports_tx.subscribe();
 
     // Send server info (file + branch + port)
+    let current_exports = state.current_exports.read().await.clone();
     let info_json = serde_json::json!({
         "type": "info",
         "file": state.watched_file,
         "branch": state.git_branch,
-        "port": state.port
+        "port": state.port,
+        "exports": current_exports
     });
     let _ = sender.send(Message::Text(info_json.to_string())).await;
 
@@ -1245,8 +1377,25 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     break;
                 }
             }
+            Ok(exports) = exports_rx.recv() => {
+                if sender.send(Message::Text(exports)).await.is_err() {
+                    break;
+                }
+            }
             Some(msg) = receiver.next() => {
                 match msg {
+                    Ok(Message::Text(text)) => {
+                        if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if cmd.get("type").and_then(|v| v.as_str()) == Some("download_exports") {
+                                let exports = state.current_exports.read().await.clone();
+                                if let Some(packet) = build_export_packet(&state.watched_file, &exports) {
+                                    if sender.send(Message::Binary(packet.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Ok(Message::Close(_)) | Err(_) => break,
                     _ => {}
                 }
