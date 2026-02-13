@@ -1230,7 +1230,7 @@ async fn service_node(
 async fn query_status_rows_from_mittens() -> Vec<StatusRow> {
     let output_result = timeout(
         Duration::from_millis(1600),
-        Command::new("./mittens").arg("status").arg("--json").output(),
+        Command::new("./mittens").arg("status-json").output(),
     )
     .await;
 

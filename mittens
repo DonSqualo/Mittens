@@ -25,22 +25,18 @@ Usage:
   mittens router systemd on [--registry PATH] [--port N]
   mittens router systemd off
   mittens router systemd start|stop|restart|status|logs
-  mittens router show
 
   mittens server on --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH] [--log-dir DIR]
   mittens server systemd on --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
   mittens server systemd off --backend-id ID
   mittens server systemd start|stop|restart|status|logs --backend-id ID
-  mittens server show
 
   mittens renderer on --renderer-id ID --worktree PATH --port N [--host HOST]
   mittens renderer systemd on --renderer-id ID --worktree PATH --port N [--host HOST]
   mittens renderer systemd off --renderer-id ID
   mittens renderer systemd start|stop|restart|status|logs --renderer-id ID
-  mittens renderer show
 
-  mittens init show
-  mittens status [--json] [-router|-server|-backend|-renderer]
+  mittens status [-router|-server|-backend|-renderer]
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -1407,11 +1403,6 @@ refresh_status_snapshot() {
   write_status_snapshot_json "$tsv_path" "$json_path"
 }
 
-status_show_kind() {
-  local kind="$1"
-  status_cmd "$kind"
-}
-
 status_kind_from_flag() {
   local flag="${1:-}"
   case "$flag" in
@@ -1425,10 +1416,6 @@ status_kind_from_flag() {
   esac
 }
 
-init_show() {
-  status_cmd
-}
-
 main() {
   local category="${1:-help}"
   if [[ $# -gt 0 ]]; then
@@ -1440,40 +1427,28 @@ main() {
       usage
       ;;
     init)
-      if [[ "${1:-}" == "show" ]]; then
-        shift
-        init_show
-      else
-        init_cmd "$@"
-      fi
+      init_cmd "$@"
       ;;
     status)
       local kind_filter="all"
-      local output_mode="table"
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --json|-j)
-            output_mode="json"
-            shift
-            ;;
           *)
             kind_filter="$(status_kind_from_flag "$1")"
             shift
             ;;
         esac
       done
-      if [[ "$output_mode" == "json" ]]; then
-        status_json_cmd
-      else
-        status_cmd "$kind_filter"
-      fi
+      status_cmd "$kind_filter"
+      ;;
+    status-json)
+      status_json_cmd
       ;;
     router)
       local action="${1:-}"
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) router_on "$@" ;;
-        show) status_show_kind "router" ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1484,7 +1459,7 @@ main() {
             *) die "unknown router systemd action '$systemd_action'" ;;
           esac
           ;;
-        *) die "unknown router action '$action' (expected: on|show|systemd)" ;;
+        *) die "unknown router action '$action' (expected: on|systemd)" ;;
       esac
       ;;
     server)
@@ -1492,7 +1467,6 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) server_on "$@" ;;
-        show) "$REPO_ROOT/mittens" status -server ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1503,7 +1477,7 @@ main() {
             *) die "unknown server systemd action '$systemd_action'" ;;
           esac
           ;;
-        *) die "unknown server action '$action' (expected: on|show|systemd)" ;;
+        *) die "unknown server action '$action' (expected: on|systemd)" ;;
       esac
       ;;
     renderer)
@@ -1511,7 +1485,6 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) run_renderer_foreground "$@" ;;
-        show) status_show_kind "renderer" ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1523,7 +1496,7 @@ main() {
           esac
           ;;
         *)
-          die "unknown renderer action '$action' (expected: on|show|systemd)"
+          die "unknown renderer action '$action' (expected: on|systemd)"
           ;;
       esac
       ;;
