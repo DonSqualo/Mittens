@@ -813,6 +813,13 @@ systemd_router_install() {
   ensure_registry_parent_dir "$registry_path"
   ensure_router_bin
 
+  if restart_existing_unit_for_kind_port "router" "$router_port"; then
+    return
+  fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$router_port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
+    die "requested router port $router_port is occupied by non-matching service"
+  fi
+
   local unit_path
   unit_path="$(systemd_router_unit_path)"
   cat >"$unit_path" <<EOF
@@ -911,6 +918,9 @@ systemd_backend_install() {
   unit_name="$(systemd_backend_unit_name "$backend_id")"
   local unit_path
   unit_path="$(systemd_backend_unit_path "$backend_id")"
+  if restart_existing_unit_for_kind_port "backend" "$backend_port"; then
+    return
+  fi
   ensure_port_available_for_unit "backend" "$backend_port" "$unit_name"
 
   cat >"$unit_path" <<EOF
@@ -1006,6 +1016,9 @@ systemd_renderer_install() {
   unit_name="$(systemd_renderer_unit_name "$renderer_id")"
   local unit_path
   unit_path="$(systemd_renderer_unit_path "$renderer_id")"
+  if restart_existing_unit_for_kind_port "renderer" "$port"; then
+    return
+  fi
   ensure_port_available_for_unit "renderer" "$port" "$unit_name"
 
   cat >"$unit_path" <<EOF
@@ -1106,6 +1119,25 @@ unit_exists() {
   local unit="$1"
   refresh_status_snapshot >/dev/null
   awk -F '\t' -v unit="$unit" '$2 == unit && $7 == "yes" { found=1 } END { exit(found ? 0 : 1) }' "$(status_snapshot_tsv_path)"
+}
+
+status_unit_for_kind_port() {
+  local kind="$1"
+  local port="$2"
+  refresh_status_snapshot >/dev/null
+  awk -F '\t' -v k="$kind" -v p="$port" '$1 == k && $3 == p && $7 == "yes" { print $2; exit }' "$(status_snapshot_tsv_path)"
+}
+
+restart_existing_unit_for_kind_port() {
+  local kind="$1"
+  local port="$2"
+  local existing_unit
+  existing_unit="$(status_unit_for_kind_port "$kind" "$port" || true)"
+  [[ -n "$existing_unit" ]] || return 1
+  systemctl --user reset-failed "$existing_unit" >/dev/null 2>&1 || true
+  systemctl --user restart "$existing_unit" || die "failed to restart existing $kind unit '$existing_unit' on port $port"
+  echo "restarted existing $kind unit '$existing_unit' on port $port"
+  return 0
 }
 
 status_cmd() {
