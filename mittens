@@ -25,16 +25,21 @@ Usage:
   mittens router systemd on [--registry PATH] [--port N]
   mittens router systemd off
   mittens router systemd start|stop|restart|status|logs
+  mittens router show
 
   mittens server on --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH] [--log-dir DIR]
   mittens server systemd on --backend-id ID --project-file FILE [--projects-root PATH] [--backend-port N] [--worktree PATH] [--owner NAME] [--branch NAME] [--registry PATH]
   mittens server systemd off --backend-id ID
   mittens server systemd start|stop|restart|status|logs --backend-id ID
+  mittens server show
 
   mittens renderer on --renderer-id ID --worktree PATH --port N [--host HOST]
   mittens renderer systemd on --renderer-id ID --worktree PATH --port N [--host HOST]
   mittens renderer systemd off --renderer-id ID
   mittens renderer systemd start|stop|restart|status|logs --renderer-id ID
+  mittens renderer show
+
+  mittens init show
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -203,28 +208,33 @@ default_backend_id_from_project() {
   sanitize_unit_id "$base"
 }
 
-manifold_ld_library_path_for_worktree() {
+manifold_runtime_lib_dir() {
+  echo "$DEFAULT_RUNTIME_DIR/lib/manifold"
+}
+
+sync_manifold_runtime_libs_for_worktree() {
   local worktree="$1"
-  local bindings_dir
-  local src_dir
-  bindings_dir="$(ls -d "$worktree"/server/target/release/build/manifold3d-sys-*/out/build/bindings/c 2>/dev/null | head -n 1 || true)"
-  src_dir="$(ls -d "$worktree"/server/target/release/build/manifold3d-sys-*/out/build/src 2>/dev/null | head -n 1 || true)"
-  if [[ -z "$bindings_dir" || -z "$src_dir" ]]; then
-    return 1
-  fi
-  echo "$bindings_dir:$src_dir"
+  local lib_dir
+  lib_dir="$(manifold_runtime_lib_dir)"
+  mkdir -p "$lib_dir"
+
+  local copied=0
+  while IFS= read -r -d '' lib; do
+    cp -f "$lib" "$lib_dir/"
+    copied=1
+  done < <(find "$worktree/server/target/release/build" -type f \( -name 'libmanifold*.so' -o -name 'libc++*.so*' -o -name 'libc++abi*.so*' \) -print0 2>/dev/null || true)
+
+  [[ "$copied" == "1" ]] || die "failed to locate manifold runtime .so files under $worktree/server/target/release/build"
 }
 
 set_backend_unit_ld_library_path() {
   local backend_id="$1"
-  local worktree="$2"
   local unit_path
   unit_path="$(systemd_backend_unit_path "$backend_id")"
   [[ -f "$unit_path" ]] || die "backend unit file not found: $unit_path"
 
   local ld_path
-  ld_path="$(manifold_ld_library_path_for_worktree "$worktree" || true)"
-  [[ -n "$ld_path" ]] || die "could not resolve manifold runtime library paths under '$worktree/server/target/release/build'"
+  ld_path="$(manifold_runtime_lib_dir)"
 
   if grep -q '^Environment=LD_LIBRARY_PATH=' "$unit_path"; then
     sed -i "s|^Environment=LD_LIBRARY_PATH=.*|Environment=LD_LIBRARY_PATH=$ld_path|" "$unit_path"
@@ -307,8 +317,12 @@ init_cmd() {
   cleanup_legacy_backend_unit "$backend_id"
   systemctl --user daemon-reload
 
-  echo "init: router systemd on (port=$router_port)"
-  systemd_router_install --registry "$registry_path" --port "$router_port"
+  if systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx 'mittens-router.service'; then
+    echo "init: router untouched (mittens-router.service already installed)"
+  else
+    echo "init: router systemd on (port=$router_port)"
+    systemd_router_install --registry "$registry_path" --port "$router_port"
+  fi
 
   echo "init: renderer systemd on (id=$renderer_id port=$renderer_port)"
   systemd_renderer_install --renderer-id "$renderer_id" --worktree "$worktree" --port "$renderer_port" --host "$renderer_host"
@@ -324,11 +338,11 @@ init_cmd() {
     --branch "$branch" \
     --registry "$registry_path"
 
-  set_backend_unit_ld_library_path "$backend_id" "$worktree"
+  sync_manifold_runtime_libs_for_worktree "$worktree"
+  set_backend_unit_ld_library_path "$backend_id"
   systemctl --user daemon-reload
   systemctl --user reset-failed "$(systemd_backend_unit_name "$backend_id")" >/dev/null 2>&1 || true
   systemctl --user restart "$(systemd_backend_unit_name "$backend_id")"
-  systemctl --user restart "mittens-router.service"
 
   mkdir -p "$(dirname "$nginx_snippet_output")"
   nginx_snippet --router-port "$router_port" --output "$nginx_snippet_output"
@@ -928,6 +942,7 @@ systemd_backend_install() {
   unit_name="$(systemd_backend_unit_name "$backend_id")"
   local unit_path
   unit_path="$(systemd_backend_unit_path "$backend_id")"
+  ensure_port_available_for_unit "backend" "$backend_port" "$unit_name"
 
   cat >"$unit_path" <<EOF
 [Unit]
@@ -1022,6 +1037,7 @@ systemd_renderer_install() {
   unit_name="$(systemd_renderer_unit_name "$renderer_id")"
   local unit_path
   unit_path="$(systemd_renderer_unit_path "$renderer_id")"
+  ensure_port_available_for_unit "renderer" "$port" "$unit_name"
 
   cat >"$unit_path" <<EOF
 [Unit]
@@ -1090,6 +1106,56 @@ systemd_renderer_action() {
   esac
 }
 
+ensure_port_available_for_unit() {
+  local kind="$1"
+  local requested_port="$2"
+  local requested_unit="$3"
+  local existing_unit=""
+
+  while IFS= read -r unit; do
+    [[ -n "$unit" ]] || continue
+    local exec_start
+    exec_start="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
+    if [[ "$exec_start" == *" --port $requested_port"* ]]; then
+      existing_unit="$unit"
+      break
+    fi
+  done < <(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '/^mittens-(backend|renderer)-.*\.service/ {print $1}')
+
+  if [[ -n "$existing_unit" && "$existing_unit" == "$requested_unit" ]]; then
+    systemctl --user reset-failed "$existing_unit" >/dev/null 2>&1 || true
+    systemctl --user restart "$existing_unit" || die "failed to restart existing $kind unit '$existing_unit' on port $requested_port"
+    return
+  fi
+
+  if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$requested_port" | grep -q LISTEN; then
+    die "requested $kind port $requested_port is occupied by non-matching service"
+  fi
+}
+
+show_services() {
+  local category="$1"
+  local units_pattern="$2"
+
+  command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
+  printf "%-10s %-38s %-8s %-10s %s\n" "kind" "unit" "port" "state" "exec"
+  while IFS= read -r unit; do
+    [[ -n "$unit" ]] || continue
+    local state exec port
+    state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+    exec="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
+    port="$(printf "%s" "$exec" | sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' | head -n1)"
+    [[ -n "$port" ]] || port="-"
+    printf "%-10s %-38s %-8s %-10s %s\n" "$category" "$unit" "$port" "${state:-unknown}" "$exec"
+  done < <(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk -v p="$units_pattern" '$1 ~ p {print $1}')
+}
+
+init_show() {
+  show_services "router" '^mittens-router\.service$'
+  show_services "backend" '^mittens-backend-.*\.service$'
+  show_services "renderer" '^mittens-renderer-.*\.service$'
+}
+
 main() {
   local category="${1:-help}"
   if [[ $# -gt 0 ]]; then
@@ -1101,13 +1167,19 @@ main() {
       usage
       ;;
     init)
-      init_cmd "$@"
+      if [[ "${1:-}" == "show" ]]; then
+        shift
+        init_show
+      else
+        init_cmd "$@"
+      fi
       ;;
     router)
       local action="${1:-}"
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) router_on "$@" ;;
+        show) show_services "router" '^mittens-router\.service$' ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1126,6 +1198,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) server_on "$@" ;;
+        show) show_services "backend" '^mittens-backend-.*\.service$' ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1144,6 +1217,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) run_renderer_foreground "$@" ;;
+        show) show_services "renderer" '^mittens-renderer-.*\.service$' ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
