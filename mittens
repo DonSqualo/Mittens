@@ -40,6 +40,7 @@ Usage:
   mittens renderer show
 
   mittens init show
+  mittens status
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -316,42 +317,10 @@ init_cmd() {
   cleanup_legacy_renderer_unit "$renderer_id"
   cleanup_legacy_backend_unit "$backend_id"
   systemctl --user daemon-reload
-
-  if systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx 'mittens-router.service'; then
-    echo "init: router untouched (mittens-router.service already installed)"
-  else
-    echo "init: router systemd on (port=$router_port)"
-    systemd_router_install --registry "$registry_path" --port "$router_port"
-  fi
-
-  echo "init: renderer systemd on (id=$renderer_id port=$renderer_port)"
-  systemd_renderer_install --renderer-id "$renderer_id" --worktree "$worktree" --port "$renderer_port" --host "$renderer_host"
-
-  echo "init: backend systemd on (id=$backend_id port=$backend_port project=$project_file)"
-  systemd_backend_install \
-    --backend-id "$backend_id" \
-    --project-file "$project_file" \
-    --projects-root "$projects_root" \
-    --backend-port "$backend_port" \
-    --worktree "$worktree" \
-    --owner "$owner" \
-    --branch "$branch" \
-    --registry "$registry_path"
-
-  sync_manifold_runtime_libs_for_worktree "$worktree"
-  set_backend_unit_ld_library_path "$backend_id"
-  systemctl --user daemon-reload
-  systemctl --user reset-failed "$(systemd_backend_unit_name "$backend_id")" >/dev/null 2>&1 || true
-  systemctl --user restart "$(systemd_backend_unit_name "$backend_id")"
-
-  mkdir -p "$(dirname "$nginx_snippet_output")"
-  nginx_snippet --router-port "$router_port" --output "$nginx_snippet_output"
-  if [[ "$enable_nginx" == "1" ]]; then
-    enable_nginx_service "$nginx_service"
-    echo "init: nginx enabled and reloaded (service=$nginx_service)"
-  else
-    echo "init: nginx skipped (--no-nginx)"
-  fi
+  status_cmd
+  maybe_restart_services "$backend_id" "$project_file" "$projects_root" "$backend_port" "$worktree" "$owner" "$branch" "$registry_path" "$renderer_id" "$renderer_port" "$renderer_host" "$router_port"
+  finalize_backend_runtime_and_nginx "$backend_id" "$worktree" "$router_port" "$nginx_snippet_output" "$enable_nginx" "$nginx_service"
+  status_cmd
 
   echo "init complete"
   echo "open: http://localhost:${renderer_port}/?backend_id=${backend_id}"
@@ -1133,6 +1102,70 @@ ensure_port_available_for_unit() {
   fi
 }
 
+unit_exists() {
+  local unit="$1"
+  systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$unit"
+}
+
+status_cmd() {
+  show_services "router" '^mittens-router\.service$'
+  show_services "backend" '^mittens-backend-.*\.service$'
+  show_services "renderer" '^mittens-renderer-.*\.service$'
+}
+
+maybe_restart_services() {
+  local backend_id="$1"
+  local project_file="$2"
+  local projects_root="$3"
+  local backend_port="$4"
+  local worktree="$5"
+  local owner="$6"
+  local branch="$7"
+  local registry_path="$8"
+  local renderer_id="$9"
+  local renderer_port="${10}"
+  local renderer_host="${11}"
+  local router_port="${12}"
+  local router_unit="mittens-router.service"
+  local backend_unit
+  backend_unit="$(systemd_backend_unit_name "$backend_id")"
+  local renderer_unit
+  renderer_unit="$(systemd_renderer_unit_name "$renderer_id")"
+
+  if unit_exists "$router_unit" && unit_exists "$backend_unit" && unit_exists "$renderer_unit"; then
+    "$REPO_ROOT/mittens" router systemd restart
+    "$REPO_ROOT/mittens" server systemd restart --backend-id "$backend_id"
+    "$REPO_ROOT/mittens" renderer systemd restart --renderer-id "$renderer_id"
+  else
+    "$REPO_ROOT/mittens" router systemd on --registry "$registry_path" --port "$router_port"
+    "$REPO_ROOT/mittens" server systemd on --backend-id "$backend_id" --project-file "$project_file" --projects-root "$projects_root" --backend-port "$backend_port" --worktree "$worktree" --owner "$owner" --branch "$branch" --registry "$registry_path"
+    "$REPO_ROOT/mittens" renderer systemd on --renderer-id "$renderer_id" --worktree "$worktree" --port "$renderer_port" --host "$renderer_host"
+  fi
+}
+
+finalize_backend_runtime_and_nginx() {
+  local backend_id="$1"
+  local worktree="$2"
+  local router_port="$3"
+  local nginx_snippet_output="$4"
+  local enable_nginx="$5"
+  local nginx_service="$6"
+
+  sync_manifold_runtime_libs_for_worktree "$worktree"
+  set_backend_unit_ld_library_path "$backend_id"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$(systemd_backend_unit_name "$backend_id")" >/dev/null 2>&1 || true
+  systemctl --user restart "$(systemd_backend_unit_name "$backend_id")"
+  mkdir -p "$(dirname "$nginx_snippet_output")"
+  nginx_snippet --router-port "$router_port" --output "$nginx_snippet_output"
+  if [[ "$enable_nginx" == "1" ]]; then
+    enable_nginx_service "$nginx_service"
+    echo "init: nginx enabled and reloaded (service=$nginx_service)"
+  else
+    echo "init: nginx skipped (--no-nginx)"
+  fi
+}
+
 show_services() {
   local category="$1"
   local units_pattern="$2"
@@ -1151,9 +1184,7 @@ show_services() {
 }
 
 init_show() {
-  show_services "router" '^mittens-router\.service$'
-  show_services "backend" '^mittens-backend-.*\.service$'
-  show_services "renderer" '^mittens-renderer-.*\.service$'
+  status_cmd
 }
 
 main() {
@@ -1174,6 +1205,9 @@ main() {
         init_cmd "$@"
       fi
       ;;
+    status)
+      status_cmd
+      ;;
     router)
       local action="${1:-}"
       [[ $# -gt 0 ]] && shift
@@ -1190,7 +1224,7 @@ main() {
             *) die "unknown router systemd action '$systemd_action'" ;;
           esac
           ;;
-        *) die "unknown router action '$action' (expected: on|systemd)" ;;
+        *) die "unknown router action '$action' (expected: on|show|systemd)" ;;
       esac
       ;;
     server)
@@ -1209,7 +1243,7 @@ main() {
             *) die "unknown server systemd action '$systemd_action'" ;;
           esac
           ;;
-        *) die "unknown server action '$action' (expected: on|systemd)" ;;
+        *) die "unknown server action '$action' (expected: on|show|systemd)" ;;
       esac
       ;;
     renderer)
@@ -1229,7 +1263,7 @@ main() {
           esac
           ;;
         *)
-          die "unknown renderer action '$action' (expected: on|systemd)"
+          die "unknown renderer action '$action' (expected: on|show|systemd)"
           ;;
       esac
       ;;
