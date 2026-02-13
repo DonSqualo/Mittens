@@ -36,7 +36,7 @@ Usage:
   mittens renderer systemd off --renderer-id ID
   mittens renderer systemd start|stop|restart|status|logs --renderer-id ID
 
-  mittens status [-router|-server|-renderer]
+  mittens status [--json] [-router|-server|-renderer]
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -1431,15 +1431,24 @@ main() {
       ;;
     status)
       local kind_filter="all"
+      local output_mode="table"
       while [[ $# -gt 0 ]]; do
         case "$1" in
+          --json|-j)
+            output_mode="json"
+            shift
+            ;;
           *)
             kind_filter="$(status_kind_from_flag "$1")"
             shift
             ;;
         esac
       done
-      status_cmd "$kind_filter"
+      if [[ "$output_mode" == "json" ]]; then
+        status_json_cmd
+      else
+        status_cmd "$kind_filter"
+      fi
       ;;
     status-json)
       status_json_cmd
