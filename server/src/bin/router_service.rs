@@ -83,6 +83,8 @@ struct ServiceNode {
     kind: String,
     id: String,
     systemd_unit: String,
+    configured_port: Option<u16>,
+    listening_process: Option<String>,
     load_state: Option<String>,
     active_state: Option<String>,
     sub_state: Option<String>,
@@ -140,6 +142,23 @@ struct UnitStatus {
     sub_state: Option<String>,
     unit_file_state: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StatusSnapshot {
+    rows: Vec<StatusRow>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct StatusRow {
+    #[serde(rename = "kind")]
+    _kind: String,
+    unit: String,
+    port: String,
+    state: String,
+    listen: String,
+    process: String,
+    exists: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -829,7 +848,7 @@ async fn proxy_backend_ws(
             socket,
         )
     })
-        .into_response()
+    .into_response()
 }
 
 fn is_ws_url(ws_url: &str) -> bool {
@@ -1013,12 +1032,17 @@ async fn build_graph_response(
         renderer.backend_ids.insert(connection.backend_id.clone());
         renderer.client_addrs.insert(connection.client_addr.clone());
 
-        let backend = backend_agg.entry(connection.backend_id.clone()).or_default();
+        let backend = backend_agg
+            .entry(connection.backend_id.clone())
+            .or_default();
         backend.count += 1;
         backend.renderer_ids.insert(connection.renderer_id.clone());
 
         let edge = edge_agg
-            .entry((connection.renderer_id.clone(), connection.backend_id.clone()))
+            .entry((
+                connection.renderer_id.clone(),
+                connection.backend_id.clone(),
+            ))
             .or_default();
         edge.backend_ws_url = connection.backend_ws_url.clone();
         edge.count += 1;
@@ -1099,17 +1123,43 @@ async fn build_graph_response(
             .then(a.backend_id.cmp(&b.backend_id))
     });
 
+    let status_rows = query_status_rows_from_mittens().await;
+    let mut status_rows_by_unit: HashMap<String, StatusRow> = HashMap::new();
+    for row in status_rows {
+        status_rows_by_unit.insert(row.unit.clone(), row);
+    }
+
     let mut services = Vec::new();
-    services.push(service_node("router", "router", "mittens-router.service").await);
+    services.push(
+        service_node(
+            "router",
+            "router",
+            "mittens-router.service",
+            status_rows_by_unit.get("mittens-router.service"),
+        )
+        .await,
+    );
     for backend in &backends {
-        services.push(service_node("backend", &backend.backend_id, &backend.systemd_unit).await);
+        services.push(
+            service_node(
+                "backend",
+                &backend.backend_id,
+                &backend.systemd_unit,
+                status_rows_by_unit.get(&backend.systemd_unit),
+            )
+            .await,
+        );
     }
     for renderer in &renderers {
-        services.push(service_node(
-            "renderer",
-            &renderer.renderer_id,
-            &renderer.systemd_unit,
-        ).await);
+        services.push(
+            service_node(
+                "renderer",
+                &renderer.renderer_id,
+                &renderer.systemd_unit,
+                status_rows_by_unit.get(&renderer.systemd_unit),
+            )
+            .await,
+        );
     }
     services.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.id.cmp(&b.id)));
 
@@ -1124,19 +1174,89 @@ async fn build_graph_response(
     }
 }
 
-async fn service_node(kind: &str, id: &str, systemd_unit: &str) -> ServiceNode {
+async fn service_node(
+    kind: &str,
+    id: &str,
+    systemd_unit: &str,
+    status_row: Option<&StatusRow>,
+) -> ServiceNode {
+    if let Some(row) = status_row {
+        let (active_state, sub_state) = parse_state_parts(&row.state);
+        let configured_port = row.port.parse::<u16>().ok();
+        let listening_process = non_dash(&row.process);
+        let healthy = row.listen == "yes";
+        return ServiceNode {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            systemd_unit: systemd_unit.to_string(),
+            configured_port,
+            listening_process,
+            load_state: Some(if row.exists == "yes" {
+                "loaded".to_string()
+            } else {
+                "not-found".to_string()
+            }),
+            active_state,
+            sub_state,
+            unit_file_state: Some(if row.exists == "yes" {
+                "enabled".to_string()
+            } else {
+                "missing".to_string()
+            }),
+            healthy,
+            error: None,
+        };
+    }
+
     let status = query_systemd_unit_status(systemd_unit).await;
     let healthy = status.healthy();
+    let configured_port = configured_port_for_unit(systemd_unit);
+    let listening_process = configured_port.and_then(listening_process_for_port);
     ServiceNode {
         kind: kind.to_string(),
         id: id.to_string(),
         systemd_unit: systemd_unit.to_string(),
+        configured_port,
+        listening_process,
         load_state: status.load_state,
         active_state: status.active_state,
         sub_state: status.sub_state,
         unit_file_state: status.unit_file_state,
         healthy,
         error: status.error,
+    }
+}
+
+async fn query_status_rows_from_mittens() -> Vec<StatusRow> {
+    let output_result = timeout(
+        Duration::from_millis(1600),
+        Command::new("./mittens").arg("status-json").output(),
+    )
+    .await;
+
+    let output = match output_result {
+        Ok(Ok(output)) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    serde_json::from_slice::<StatusSnapshot>(&output.stdout)
+        .map(|snapshot| snapshot.rows)
+        .unwrap_or_default()
+}
+
+fn parse_state_parts(state: &str) -> (Option<String>, Option<String>) {
+    if let Some((active, sub)) = state.split_once('/') {
+        return (non_dash(active), non_dash(sub));
+    }
+    (non_dash(state), None)
+}
+
+fn non_dash(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1195,6 +1315,41 @@ async fn query_systemd_unit_status(unit_name: &str) -> UnitStatus {
         unit_file_state: non_empty(lines.next()),
         error: None,
     }
+}
+
+fn configured_port_for_unit(unit_name: &str) -> Option<u16> {
+    let output = StdCommand::new("systemctl")
+        .arg("--user")
+        .arg("show")
+        .arg(unit_name)
+        .arg("--property=ExecStart")
+        .arg("--value")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let exec_start = String::from_utf8_lossy(&output.stdout);
+    let tokens: Vec<&str> = exec_start.split_whitespace().collect();
+    extract_flag_value(&tokens, "--port").and_then(|p| p.parse::<u16>().ok())
+}
+
+fn listening_process_for_port(port: u16) -> Option<String> {
+    let output = StdCommand::new("ss")
+        .arg("-ltnp")
+        .arg(format!("sport = :{}", port))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().skip(1) {
+        if let Some(proc_part) = line.split("users:(").nth(1) {
+            return Some(proc_part.trim_end_matches(')').to_string());
+        }
+    }
+    None
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -1274,8 +1429,8 @@ fn discover_renderer_service_configs() -> Vec<RendererServiceConfig> {
                 config.branch = extract_flag_value(&tokens, "--branch");
                 config.worktree = extract_flag_value(&tokens, "--worktree");
                 config.host = extract_flag_value(&tokens, "--host");
-                config.port = extract_flag_value(&tokens, "--port")
-                    .and_then(|raw| raw.parse::<u16>().ok());
+                config.port =
+                    extract_flag_value(&tokens, "--port").and_then(|raw| raw.parse::<u16>().ok());
             }
         }
         if config.branch.is_none() {
@@ -1350,7 +1505,10 @@ fn sanitize_unit_id(value: &str) -> String {
 
 fn systemd_user_dir() -> PathBuf {
     if let Ok(home) = env::var("HOME") {
-        return PathBuf::from(home).join(".config").join("systemd").join("user");
+        return PathBuf::from(home)
+            .join(".config")
+            .join("systemd")
+            .join("user");
     }
     PathBuf::from(".config/systemd/user")
 }

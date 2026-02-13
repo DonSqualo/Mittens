@@ -36,6 +36,8 @@ Usage:
   mittens renderer systemd off --renderer-id ID
   mittens renderer systemd start|stop|restart|status|logs --renderer-id ID
 
+  mittens status [--json] [-router|-server|-renderer]
+
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
 EOF
@@ -173,6 +175,9 @@ resolve_project_file() {
   local candidate_abs
   candidate_abs="$(readlink -f "$candidate" 2>/dev/null || true)"
   [[ -n "$candidate_abs" ]] || die "project file not found: $candidate"
+  [[ -f "$candidate_abs" ]] || die "project path is not a file: $candidate_abs"
+  [[ -r "$candidate_abs" ]] || die "project file is not readable: $candidate_abs"
+  [[ "$candidate_abs" == *.lua ]] || die "project file must end with .lua: $candidate_abs"
 
   case "$candidate_abs" in
     "$projects_root_abs"/*) ;;
@@ -203,28 +208,33 @@ default_backend_id_from_project() {
   sanitize_unit_id "$base"
 }
 
-manifold_ld_library_path_for_worktree() {
+manifold_runtime_lib_dir() {
+  echo "$DEFAULT_RUNTIME_DIR/lib/manifold"
+}
+
+sync_manifold_runtime_libs_for_worktree() {
   local worktree="$1"
-  local bindings_dir
-  local src_dir
-  bindings_dir="$(ls -d "$worktree"/server/target/release/build/manifold3d-sys-*/out/build/bindings/c 2>/dev/null | head -n 1 || true)"
-  src_dir="$(ls -d "$worktree"/server/target/release/build/manifold3d-sys-*/out/build/src 2>/dev/null | head -n 1 || true)"
-  if [[ -z "$bindings_dir" || -z "$src_dir" ]]; then
-    return 1
-  fi
-  echo "$bindings_dir:$src_dir"
+  local lib_dir
+  lib_dir="$(manifold_runtime_lib_dir)"
+  mkdir -p "$lib_dir"
+
+  local copied=0
+  while IFS= read -r -d '' lib; do
+    cp -f "$lib" "$lib_dir/"
+    copied=1
+  done < <(find "$worktree/server/target/release/build" -type f \( -name 'libmanifold*.so' -o -name 'libc++*.so*' -o -name 'libc++abi*.so*' \) -print0 2>/dev/null || true)
+
+  [[ "$copied" == "1" ]] || die "failed to locate manifold runtime .so files under $worktree/server/target/release/build"
 }
 
 set_backend_unit_ld_library_path() {
   local backend_id="$1"
-  local worktree="$2"
   local unit_path
   unit_path="$(systemd_backend_unit_path "$backend_id")"
   [[ -f "$unit_path" ]] || die "backend unit file not found: $unit_path"
 
   local ld_path
-  ld_path="$(manifold_ld_library_path_for_worktree "$worktree" || true)"
-  [[ -n "$ld_path" ]] || die "could not resolve manifold runtime library paths under '$worktree/server/target/release/build'"
+  ld_path="$(manifold_runtime_lib_dir)"
 
   if grep -q '^Environment=LD_LIBRARY_PATH=' "$unit_path"; then
     sed -i "s|^Environment=LD_LIBRARY_PATH=.*|Environment=LD_LIBRARY_PATH=$ld_path|" "$unit_path"
@@ -306,38 +316,10 @@ init_cmd() {
   cleanup_legacy_renderer_unit "$renderer_id"
   cleanup_legacy_backend_unit "$backend_id"
   systemctl --user daemon-reload
-
-  echo "init: router systemd on (port=$router_port)"
-  systemd_router_install --registry "$registry_path" --port "$router_port"
-
-  echo "init: renderer systemd on (id=$renderer_id port=$renderer_port)"
-  systemd_renderer_install --renderer-id "$renderer_id" --worktree "$worktree" --port "$renderer_port" --host "$renderer_host"
-
-  echo "init: backend systemd on (id=$backend_id port=$backend_port project=$project_file)"
-  systemd_backend_install \
-    --backend-id "$backend_id" \
-    --project-file "$project_file" \
-    --projects-root "$projects_root" \
-    --backend-port "$backend_port" \
-    --worktree "$worktree" \
-    --owner "$owner" \
-    --branch "$branch" \
-    --registry "$registry_path"
-
-  set_backend_unit_ld_library_path "$backend_id" "$worktree"
-  systemctl --user daemon-reload
-  systemctl --user reset-failed "$(systemd_backend_unit_name "$backend_id")" >/dev/null 2>&1 || true
-  systemctl --user restart "$(systemd_backend_unit_name "$backend_id")"
-  systemctl --user restart "mittens-router.service"
-
-  mkdir -p "$(dirname "$nginx_snippet_output")"
-  nginx_snippet --router-port "$router_port" --output "$nginx_snippet_output"
-  if [[ "$enable_nginx" == "1" ]]; then
-    enable_nginx_service "$nginx_service"
-    echo "init: nginx enabled and reloaded (service=$nginx_service)"
-  else
-    echo "init: nginx skipped (--no-nginx)"
-  fi
+  status_cmd
+  maybe_restart_services "$backend_id" "$project_file" "$projects_root" "$backend_port" "$worktree" "$owner" "$branch" "$registry_path" "$renderer_id" "$renderer_port" "$renderer_host" "$router_port"
+  finalize_backend_runtime_and_nginx "$backend_id" "$worktree" "$router_port" "$nginx_snippet_output" "$enable_nginx" "$nginx_service"
+  status_cmd
 
   echo "init complete"
   echo "open: http://localhost:${renderer_port}/?backend_id=${backend_id}"
@@ -830,6 +812,13 @@ systemd_router_install() {
   ensure_registry_parent_dir "$registry_path"
   ensure_router_bin
 
+  if restart_existing_unit_for_kind_port "router" "$router_port"; then
+    return
+  fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$router_port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
+    die "requested router port $router_port is occupied by non-matching service"
+  fi
+
   local unit_path
   unit_path="$(systemd_router_unit_path)"
   cat >"$unit_path" <<EOF
@@ -928,6 +917,10 @@ systemd_backend_install() {
   unit_name="$(systemd_backend_unit_name "$backend_id")"
   local unit_path
   unit_path="$(systemd_backend_unit_path "$backend_id")"
+  if restart_existing_unit_for_kind_port "backend" "$backend_port"; then
+    return
+  fi
+  ensure_port_available_for_unit "backend" "$backend_port" "$unit_name"
 
   cat >"$unit_path" <<EOF
 [Unit]
@@ -1022,6 +1015,10 @@ systemd_renderer_install() {
   unit_name="$(systemd_renderer_unit_name "$renderer_id")"
   local unit_path
   unit_path="$(systemd_renderer_unit_path "$renderer_id")"
+  if restart_existing_unit_for_kind_port "renderer" "$port"; then
+    return
+  fi
+  ensure_port_available_for_unit "renderer" "$port" "$unit_name"
 
   cat >"$unit_path" <<EOF
 [Unit]
@@ -1090,6 +1087,335 @@ systemd_renderer_action() {
   esac
 }
 
+ensure_port_available_for_unit() {
+  local kind="$1"
+  local requested_port="$2"
+  local requested_unit="$3"
+  local existing_unit=""
+
+  while IFS= read -r unit; do
+    [[ -n "$unit" ]] || continue
+    local exec_start
+    exec_start="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
+    if [[ "$exec_start" == *" --port $requested_port"* ]]; then
+      existing_unit="$unit"
+      break
+    fi
+  done < <(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '/^mittens-(backend|renderer)-.*\.service/ {print $1}')
+
+  if [[ -n "$existing_unit" && "$existing_unit" == "$requested_unit" ]]; then
+    systemctl --user reset-failed "$existing_unit" >/dev/null 2>&1 || true
+    systemctl --user restart "$existing_unit" || die "failed to restart existing $kind unit '$existing_unit' on port $requested_port"
+    return
+  fi
+
+  if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$requested_port" | grep -q LISTEN; then
+    die "requested $kind port $requested_port is occupied by non-matching service"
+  fi
+}
+
+unit_exists() {
+  local unit="$1"
+  refresh_status_snapshot >/dev/null
+  awk -F '\t' -v unit="$unit" '$2 == unit && $7 == "yes" { found=1 } END { exit(found ? 0 : 1) }' "$(status_snapshot_tsv_path)"
+}
+
+status_unit_for_kind_port() {
+  local kind="$1"
+  local port="$2"
+  refresh_status_snapshot >/dev/null
+  awk -F '\t' -v k="$kind" -v p="$port" '$1 == k && $3 == p && $7 == "yes" { print $2; exit }' "$(status_snapshot_tsv_path)"
+}
+
+restart_existing_unit_for_kind_port() {
+  local kind="$1"
+  local port="$2"
+  local existing_unit
+  existing_unit="$(status_unit_for_kind_port "$kind" "$port" || true)"
+  [[ -n "$existing_unit" ]] || return 1
+  systemctl --user reset-failed "$existing_unit" >/dev/null 2>&1 || true
+  systemctl --user restart "$existing_unit" || die "failed to restart existing $kind unit '$existing_unit' on port $port"
+  echo "restarted existing $kind unit '$existing_unit' on port $port"
+  return 0
+}
+
+status_cmd() {
+  local kind_filter="${1:-all}"
+  refresh_status_snapshot >/dev/null
+  printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n" "kind" "unit" "port" "state" "listen" "exists" "process"
+  if [[ "$kind_filter" == "all" ]]; then
+    awk -F '\t' '{ printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
+  else
+    awk -F '\t' -v k="$kind_filter" '$1 == k { printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
+  fi
+}
+
+status_json_cmd() {
+  refresh_status_snapshot >/dev/null
+  cat "$(status_snapshot_json_path)"
+}
+
+maybe_restart_services() {
+  local backend_id="$1"
+  local project_file="$2"
+  local projects_root="$3"
+  local backend_port="$4"
+  local worktree="$5"
+  local owner="$6"
+  local branch="$7"
+  local registry_path="$8"
+  local renderer_id="$9"
+  local renderer_port="${10}"
+  local renderer_host="${11}"
+  local router_port="${12}"
+  local router_unit="mittens-router.service"
+  local backend_unit
+  backend_unit="$(systemd_backend_unit_name "$backend_id")"
+  local renderer_unit
+  renderer_unit="$(systemd_renderer_unit_name "$renderer_id")"
+
+  if unit_exists "$router_unit" && unit_exists "$backend_unit" && unit_exists "$renderer_unit"; then
+    "$REPO_ROOT/mittens" router systemd restart
+    "$REPO_ROOT/mittens" server systemd restart --backend-id "$backend_id"
+    "$REPO_ROOT/mittens" renderer systemd restart --renderer-id "$renderer_id"
+  else
+    "$REPO_ROOT/mittens" router systemd on --registry "$registry_path" --port "$router_port"
+    "$REPO_ROOT/mittens" server systemd on --backend-id "$backend_id" --project-file "$project_file" --projects-root "$projects_root" --backend-port "$backend_port" --worktree "$worktree" --owner "$owner" --branch "$branch" --registry "$registry_path"
+    "$REPO_ROOT/mittens" renderer systemd on --renderer-id "$renderer_id" --worktree "$worktree" --port "$renderer_port" --host "$renderer_host"
+  fi
+}
+
+finalize_backend_runtime_and_nginx() {
+  local backend_id="$1"
+  local worktree="$2"
+  local router_port="$3"
+  local nginx_snippet_output="$4"
+  local enable_nginx="$5"
+  local nginx_service="$6"
+
+  sync_manifold_runtime_libs_for_worktree "$worktree"
+  set_backend_unit_ld_library_path "$backend_id"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$(systemd_backend_unit_name "$backend_id")" >/dev/null 2>&1 || true
+  systemctl --user restart "$(systemd_backend_unit_name "$backend_id")"
+  mkdir -p "$(dirname "$nginx_snippet_output")"
+  nginx_snippet --router-port "$router_port" --output "$nginx_snippet_output"
+  if [[ "$enable_nginx" == "1" ]]; then
+    enable_nginx_service "$nginx_service"
+    echo "init: nginx enabled and reloaded (service=$nginx_service)"
+  else
+    echo "init: nginx skipped (--no-nginx)"
+  fi
+}
+
+status_snapshot_tsv_path() {
+  echo "$(status_snapshot_dir)/status.snapshot.tsv"
+}
+
+status_snapshot_json_path() {
+  echo "$(status_snapshot_dir)/status.snapshot.json"
+}
+
+status_snapshot_dir() {
+  local dir="/tmp/mittens-runtime"
+  mkdir -p "$dir"
+  echo "$dir"
+}
+
+now_unix_ms() {
+  date +%s%3N 2>/dev/null || echo "$(( $(date +%s) * 1000 ))"
+}
+
+json_escape() {
+  printf "%s" "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+discover_status_units() {
+  local tmp
+  tmp="$(mktemp)"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '/^mittens-(router|backend|renderer)-.*[.]service/ {print $1}' >>"$tmp" || true
+  fi
+  local file unit
+  for file in "$DEFAULT_SYSTEMD_USER_DIR"/mittens-*.service; do
+    [[ -f "$file" ]] || continue
+    unit="$(basename "$file")"
+    case "$unit" in
+      mittens-router.service|mittens-backend-*.service|mittens-renderer-*.service) printf "%s\n" "$unit" >>"$tmp" ;;
+    esac
+  done
+  if [[ -f "$DEFAULT_REGISTRY_PATH" ]]; then
+    awk '
+      /"backend_id"[[:space:]]*:/ {
+        if (match($0, /"backend_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+          id = substr($0, RSTART, RLENGTH)
+          sub(/.*"backend_id"[[:space:]]*:[[:space:]]*"/, "", id)
+          sub(/".*/, "", id)
+          if (id != "") {
+            print "mittens-backend-" id ".service"
+          }
+        }
+      }
+    ' "$DEFAULT_REGISTRY_PATH" >>"$tmp"
+  fi
+  sort -u "$tmp"
+  rm -f "$tmp"
+}
+
+unit_kind() {
+  local unit="$1"
+  case "$unit" in
+    mittens-router.service) echo "router" ;;
+    mittens-backend-*.service) echo "backend" ;;
+    mittens-renderer-*.service) echo "renderer" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+unit_exists_in_system() {
+  local unit="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$unit" && return 0
+  fi
+  [[ -f "$DEFAULT_SYSTEMD_USER_DIR/$unit" ]]
+}
+
+port_from_registry_for_backend_unit() {
+  local unit="$1"
+  [[ "$unit" == mittens-backend-*.service ]] || return 0
+  [[ -f "$DEFAULT_REGISTRY_PATH" ]] || return 0
+  local backend_id
+  backend_id="${unit#mittens-backend-}"
+  backend_id="${backend_id%.service}"
+  awk -v want="$backend_id" '
+    /"backend_id"[[:space:]]*:/ {
+      id=""
+      if (match($0, /"backend_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+        id = substr($0, RSTART, RLENGTH)
+        sub(/.*"backend_id"[[:space:]]*:[[:space:]]*"/, "", id)
+        sub(/".*/, "", id)
+      }
+    }
+    /"backend_port"[[:space:]]*:/ {
+      if (id == want && match($0, /"backend_port"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+        p = substr($0, RSTART, RLENGTH)
+        sub(/.*"backend_port"[[:space:]]*:[[:space:]]*/, "", p)
+        print p
+        exit
+      }
+    }
+  ' "$DEFAULT_REGISTRY_PATH"
+}
+
+unit_port() {
+  local unit="$1"
+  local exec port
+  exec="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
+  port="$(printf "%s" "$exec" | sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' | head -n1)"
+  if [[ -z "$port" && -f "$DEFAULT_SYSTEMD_USER_DIR/$unit" ]]; then
+    port="$(sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' "$DEFAULT_SYSTEMD_USER_DIR/$unit" | head -n1)"
+  fi
+  if [[ -z "$port" ]]; then
+    port="$(port_from_registry_for_backend_unit "$unit" || true)"
+  fi
+  if [[ -z "$port" && "$unit" == "mittens-router.service" ]]; then
+    port="$DEFAULT_ROUTER_PORT"
+  fi
+  [[ -n "$port" ]] || port="-"
+  printf "%s" "$port"
+}
+
+unit_state() {
+  local unit="$1"
+  local active sub
+  active="$(systemctl --user show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  sub="$(systemctl --user show "$unit" --property=SubState --value 2>/dev/null || true)"
+  [[ -n "$active" ]] || active="unknown"
+  [[ -n "$sub" ]] || sub="unknown"
+  printf "%s/%s" "$active" "$sub"
+}
+
+port_listen_and_process() {
+  local port="$1"
+  local listen process
+  if [[ "$port" != "-" ]] && command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
+    listen="yes"
+  else
+    listen="no"
+  fi
+  process="-"
+  if [[ "$port" != "-" ]] && command -v ss >/dev/null 2>&1; then
+    process="$(ss -ltnp "sport = :$port" 2>/dev/null | awk -F'users:\\(' 'NR>1 {gsub(/[)]$/, "", $2); print $2; exit}')"
+    [[ -n "$process" ]] || process="-"
+  fi
+  printf "%s\t%s" "$listen" "$process"
+}
+
+write_status_snapshot_json() {
+  local tsv_path="$1"
+  local json_path="$2"
+  local tmp_json
+  tmp_json="$(mktemp)"
+  {
+    printf "{\n"
+    printf "  \"generated_at_unix_ms\": %s,\n" "$(now_unix_ms)"
+    printf "  \"rows\": [\n"
+    local first=1
+    while IFS=$'\t' read -r kind unit port state listen process exists; do
+      [[ -n "$kind" ]] || continue
+      if [[ "$first" == "0" ]]; then
+        printf ",\n"
+      fi
+      first=0
+      printf "    {\"kind\":\"%s\",\"unit\":\"%s\",\"port\":\"%s\",\"state\":\"%s\",\"listen\":\"%s\",\"process\":\"%s\",\"exists\":\"%s\"}" \
+        "$(json_escape "$kind")" "$(json_escape "$unit")" "$(json_escape "$port")" "$(json_escape "$state")" \
+        "$(json_escape "$listen")" "$(json_escape "$process")" "$(json_escape "$exists")"
+    done <"$tsv_path"
+    printf "\n  ]\n"
+    printf "}\n"
+  } >"$tmp_json"
+  mv "$tmp_json" "$json_path"
+}
+
+refresh_status_snapshot() {
+  local tsv_path json_path
+  tsv_path="$(status_snapshot_tsv_path)"
+  json_path="$(status_snapshot_json_path)"
+  : >"$tsv_path"
+  while IFS= read -r unit; do
+    [[ -n "$unit" ]] || continue
+    local kind exists port state listen_process listen process
+    kind="$(unit_kind "$unit")"
+    [[ "$kind" == "unknown" ]] && continue
+    if unit_exists_in_system "$unit"; then
+      exists="yes"
+    else
+      exists="no"
+    fi
+    port="$(unit_port "$unit")"
+    state="$(unit_state "$unit")"
+    listen_process="$(port_listen_and_process "$port")"
+    listen="${listen_process%%$'\t'*}"
+    process="${listen_process#*$'\t'}"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$kind" "$unit" "$port" "$state" "$listen" "$process" "$exists" >>"$tsv_path"
+  done < <(discover_status_units | awk '{gsub(/\r/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); if ($0 != "") print $0}' | sort -u)
+  sort -u "$tsv_path" -o "$tsv_path"
+  write_status_snapshot_json "$tsv_path" "$json_path"
+}
+
+status_kind_from_flag() {
+  local flag="${1:-}"
+  case "$flag" in
+    ""|all) echo "all" ;;
+    -router|router) echo "router" ;;
+    -server|server) echo "backend" ;;
+    -renderer|renderer) echo "renderer" ;;
+    *)
+      die "unknown status filter '$flag' (expected: -router|-server|-renderer)"
+      ;;
+  esac
+}
+
 main() {
   local category="${1:-help}"
   if [[ $# -gt 0 ]]; then
@@ -1102,6 +1428,30 @@ main() {
       ;;
     init)
       init_cmd "$@"
+      ;;
+    status)
+      local kind_filter="all"
+      local output_mode="table"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json|-j)
+            output_mode="json"
+            shift
+            ;;
+          *)
+            kind_filter="$(status_kind_from_flag "$1")"
+            shift
+            ;;
+        esac
+      done
+      if [[ "$output_mode" == "json" ]]; then
+        status_json_cmd
+      else
+        status_cmd "$kind_filter"
+      fi
+      ;;
+    status-json)
+      status_json_cmd
       ;;
     router)
       local action="${1:-}"
