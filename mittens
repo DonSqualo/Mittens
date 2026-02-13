@@ -1108,9 +1108,10 @@ unit_exists() {
 }
 
 status_cmd() {
-  show_services "router" '^mittens-router[.]service$'
-  show_services "backend" '^mittens-backend-.*[.]service$'
-  show_services "renderer" '^mittens-renderer-.*[.]service$'
+  printf "%-10s %-38s %-8s %-14s %-8s %s\n" "kind" "unit" "port" "state" "listen" "process"
+  show_services "router" '^mittens-router[.]service$' "0"
+  show_services "backend" '^mittens-backend-.*[.]service$' "0"
+  show_services "renderer" '^mittens-renderer-.*[.]service$' "0"
 }
 
 maybe_restart_services() {
@@ -1169,9 +1170,12 @@ finalize_backend_runtime_and_nginx() {
 show_services() {
   local category="$1"
   local units_pattern="$2"
+  local print_header="${3:-1}"
 
   command -v ss >/dev/null 2>&1 || die "ss not found"
-  printf "%-10s %-38s %-8s %-14s %-8s %s\n" "kind" "unit" "port" "state" "listen" "process"
+  if [[ "$print_header" == "1" ]]; then
+    printf "%-10s %-38s %-8s %-14s %-8s %s\n" "kind" "unit" "port" "state" "listen" "process"
+  fi
   local found=0
   local units_output=""
   if command -v systemctl >/dev/null 2>&1; then
