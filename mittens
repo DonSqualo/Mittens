@@ -40,7 +40,7 @@ Usage:
   mittens renderer show
 
   mittens init show
-  mittens status
+  mittens status [-router|-server|-backend|-renderer]
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -1109,9 +1109,14 @@ unit_exists() {
 }
 
 status_cmd() {
+  local kind_filter="${1:-all}"
   refresh_status_snapshot >/dev/null
   printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n" "kind" "unit" "port" "state" "listen" "exists" "process"
-  awk -F '\t' '{ printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
+  if [[ "$kind_filter" == "all" ]]; then
+    awk -F '\t' '{ printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
+  else
+    awk -F '\t' -v k="$kind_filter" '$1 == k { printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
+  fi
 }
 
 maybe_restart_services() {
@@ -1364,9 +1369,20 @@ refresh_status_snapshot() {
 
 status_show_kind() {
   local kind="$1"
-  refresh_status_snapshot >/dev/null
-  printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n" "kind" "unit" "port" "state" "listen" "exists" "process"
-  awk -F '\t' -v k="$kind" '$1 == k { printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
+  status_cmd "$kind"
+}
+
+status_kind_from_flag() {
+  local flag="${1:-}"
+  case "$flag" in
+    ""|all) echo "all" ;;
+    -router|router) echo "router" ;;
+    -server|-backend|server|backend) echo "backend" ;;
+    -renderer|renderer) echo "renderer" ;;
+    *)
+      die "unknown status filter '$flag' (expected: -router|-server|-backend|-renderer)"
+      ;;
+  esac
 }
 
 init_show() {
@@ -1392,7 +1408,7 @@ main() {
       fi
       ;;
     status)
-      status_cmd
+      status_cmd "$(status_kind_from_flag "${1:-}")"
       ;;
     router)
       local action="${1:-}"
@@ -1418,7 +1434,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) server_on "$@" ;;
-        show) status_show_kind "backend" ;;
+        show) "$REPO_ROOT/mittens" status -server ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
