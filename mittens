@@ -1104,14 +1104,14 @@ ensure_port_available_for_unit() {
 
 unit_exists() {
   local unit="$1"
-  systemctl --user list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "$unit"
+  refresh_status_snapshot >/dev/null
+  awk -F '\t' -v unit="$unit" '$2 == unit && $7 == "yes" { found=1 } END { exit(found ? 0 : 1) }' "$(status_snapshot_tsv_path)"
 }
 
 status_cmd() {
-  printf "%-10s %-38s %-8s %-14s %-8s %s\n" "kind" "unit" "port" "state" "listen" "process"
-  show_services "router" '^mittens-router[.]service$' "0"
-  show_services "backend" '^mittens-backend-.*[.]service$' "0"
-  show_services "renderer" '^mittens-renderer-.*[.]service$' "0"
+  refresh_status_snapshot >/dev/null
+  printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n" "kind" "unit" "port" "state" "listen" "exists" "process"
+  awk -F '\t' '{ printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
 }
 
 maybe_restart_services() {
@@ -1167,123 +1167,206 @@ finalize_backend_runtime_and_nginx() {
   fi
 }
 
-show_services() {
-  local category="$1"
-  local units_pattern="$2"
-  local print_header="${3:-1}"
-
-  command -v ss >/dev/null 2>&1 || die "ss not found"
-  if [[ "$print_header" == "1" ]]; then
-    printf "%-10s %-38s %-8s %-14s %-8s %s\n" "kind" "unit" "port" "state" "listen" "process"
-  fi
-  local found=0
-  local units_output=""
-  if command -v systemctl >/dev/null 2>&1; then
-    units_output="$(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null || true)"
-  fi
-
-  while IFS= read -r unit; do
-    [[ -n "$unit" ]] || continue
-    found=1
-    local active_state sub_state state exec port listen process
-    active_state="$(systemctl --user show "$unit" --property=ActiveState --value 2>/dev/null || true)"
-    sub_state="$(systemctl --user show "$unit" --property=SubState --value 2>/dev/null || true)"
-    state="${active_state:-unknown}/${sub_state:-unknown}"
-    exec="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
-    port="$(printf "%s" "$exec" | sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' | head -n1)"
-    [[ -n "$port" ]] || port="-"
-    if [[ "$port" != "-" ]] && command -v ss >/dev/null 2>&1; then
-      if ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
-        listen="yes"
-      else
-        listen="no"
-      fi
-      process="$(ss -ltnp "sport = :$port" 2>/dev/null | awk -F'users:\\(' 'NR>1 {gsub(/[)]$/, "", $2); print $2; exit}')"
-      [[ -n "$process" ]] || process="-"
-    else
-      listen="-"
-      process="-"
-    fi
-    printf "%-10s %-38s %-8s %-14s %-8s %s\n" "$category" "$unit" "$port" "$state" "$listen" "$process"
-  done < <(printf "%s\n" "$units_output" | awk -v p="$units_pattern" '$1 ~ p {print $1}')
-  if [[ "$found" == "0" ]]; then
-    show_services_by_port_fallback "$category"
-  fi
+status_snapshot_tsv_path() {
+  echo "$(status_snapshot_dir)/status.snapshot.tsv"
 }
 
-show_services_by_port_fallback() {
-  local category="$1"
-  case "$category" in
-    router)
-      print_port_probe_row "router" "mittens-router.service" "3100"
-      ;;
-    backend)
-      local printed=0
-      local registry_path="$DEFAULT_REGISTRY_PATH"
-      if [[ -f "$registry_path" ]]; then
-        while IFS='|' read -r backend_id backend_port; do
-          [[ -n "$backend_id" && -n "$backend_port" ]] || continue
-          print_port_probe_row "backend" "mittens-backend-${backend_id}.service" "$backend_port"
-          printed=1
-        done < <(awk '
-          /"backend_id"[[:space:]]*:/ {
-            if (match($0, /"backend_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-              id = substr($0, RSTART, RLENGTH)
-              sub(/.*"backend_id"[[:space:]]*:[[:space:]]*"/, "", id)
-              sub(/".*/, "", id)
-            }
+status_snapshot_json_path() {
+  echo "$(status_snapshot_dir)/status.snapshot.json"
+}
+
+status_snapshot_dir() {
+  local dir="/tmp/mittens-runtime"
+  mkdir -p "$dir"
+  echo "$dir"
+}
+
+now_unix_ms() {
+  date +%s%3N 2>/dev/null || echo "$(( $(date +%s) * 1000 ))"
+}
+
+json_escape() {
+  printf "%s" "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+discover_status_units() {
+  local tmp
+  tmp="$(mktemp)"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '/^mittens-(router|backend|renderer)-.*[.]service/ {print $1}' >>"$tmp" || true
+  fi
+  local file unit
+  for file in "$DEFAULT_SYSTEMD_USER_DIR"/mittens-*.service; do
+    [[ -f "$file" ]] || continue
+    unit="$(basename "$file")"
+    case "$unit" in
+      mittens-router.service|mittens-backend-*.service|mittens-renderer-*.service) printf "%s\n" "$unit" >>"$tmp" ;;
+    esac
+  done
+  if [[ -f "$DEFAULT_REGISTRY_PATH" ]]; then
+    awk '
+      /"backend_id"[[:space:]]*:/ {
+        if (match($0, /"backend_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+          id = substr($0, RSTART, RLENGTH)
+          sub(/.*"backend_id"[[:space:]]*:[[:space:]]*"/, "", id)
+          sub(/".*/, "", id)
+          if (id != "") {
+            print "mittens-backend-" id ".service"
           }
-          /"backend_port"[[:space:]]*:/ {
-            if (match($0, /"backend_port"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-              port = substr($0, RSTART, RLENGTH)
-              sub(/.*"backend_port"[[:space:]]*:[[:space:]]*/, "", port)
-              if (id != "" && port != "") {
-                print id "|" port
-                id=""
-              }
-            }
-          }
-        ' "$registry_path")
-      fi
-      if [[ "$printed" == "0" ]]; then
-        printf "%-10s %-38s %-8s %-14s %-8s %s\n" "backend" "-" "-" "probe-only" "-" "no registry backends"
-      fi
-      ;;
-    renderer)
-      local printed=0
-      local unit_file
-      for unit_file in "$DEFAULT_SYSTEMD_USER_DIR"/mittens-renderer-*.service; do
-        [[ -f "$unit_file" ]] || continue
-        local unit_name renderer_port
-        unit_name="$(basename "$unit_file")"
-        renderer_port="$(sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' "$unit_file" | head -n1)"
-        [[ -n "$renderer_port" ]] || continue
-        print_port_probe_row "renderer" "$unit_name" "$renderer_port"
-        printed=1
-      done
-      if [[ "$printed" == "0" ]]; then
-        print_port_probe_row "renderer" "mittens-renderer-local.service" "3000"
-      fi
-      ;;
-    *)
-      printf "%-10s %-38s %-8s %-14s %-8s %s\n" "$category" "-" "-" "probe-only" "-" "unsupported category"
-      ;;
+        }
+      }
+    ' "$DEFAULT_REGISTRY_PATH" >>"$tmp"
+  fi
+  sort -u "$tmp"
+  rm -f "$tmp"
+}
+
+unit_kind() {
+  local unit="$1"
+  case "$unit" in
+    mittens-router.service) echo "router" ;;
+    mittens-backend-*.service) echo "backend" ;;
+    mittens-renderer-*.service) echo "renderer" ;;
+    *) echo "unknown" ;;
   esac
 }
 
-print_port_probe_row() {
-  local kind="$1"
-  local unit="$2"
-  local port="$3"
+unit_exists_in_system() {
+  local unit="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$unit" && return 0
+  fi
+  [[ -f "$DEFAULT_SYSTEMD_USER_DIR/$unit" ]]
+}
+
+port_from_registry_for_backend_unit() {
+  local unit="$1"
+  [[ "$unit" == mittens-backend-*.service ]] || return 0
+  [[ -f "$DEFAULT_REGISTRY_PATH" ]] || return 0
+  local backend_id
+  backend_id="${unit#mittens-backend-}"
+  backend_id="${backend_id%.service}"
+  awk -v want="$backend_id" '
+    /"backend_id"[[:space:]]*:/ {
+      id=""
+      if (match($0, /"backend_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+        id = substr($0, RSTART, RLENGTH)
+        sub(/.*"backend_id"[[:space:]]*:[[:space:]]*"/, "", id)
+        sub(/".*/, "", id)
+      }
+    }
+    /"backend_port"[[:space:]]*:/ {
+      if (id == want && match($0, /"backend_port"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+        p = substr($0, RSTART, RLENGTH)
+        sub(/.*"backend_port"[[:space:]]*:[[:space:]]*/, "", p)
+        print p
+        exit
+      }
+    }
+  ' "$DEFAULT_REGISTRY_PATH"
+}
+
+unit_port() {
+  local unit="$1"
+  local exec port
+  exec="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
+  port="$(printf "%s" "$exec" | sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' | head -n1)"
+  if [[ -z "$port" && -f "$DEFAULT_SYSTEMD_USER_DIR/$unit" ]]; then
+    port="$(sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' "$DEFAULT_SYSTEMD_USER_DIR/$unit" | head -n1)"
+  fi
+  if [[ -z "$port" ]]; then
+    port="$(port_from_registry_for_backend_unit "$unit" || true)"
+  fi
+  if [[ -z "$port" && "$unit" == "mittens-router.service" ]]; then
+    port="$DEFAULT_ROUTER_PORT"
+  fi
+  [[ -n "$port" ]] || port="-"
+  printf "%s" "$port"
+}
+
+unit_state() {
+  local unit="$1"
+  local active sub
+  active="$(systemctl --user show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  sub="$(systemctl --user show "$unit" --property=SubState --value 2>/dev/null || true)"
+  [[ -n "$active" ]] || active="unknown"
+  [[ -n "$sub" ]] || sub="unknown"
+  printf "%s/%s" "$active" "$sub"
+}
+
+port_listen_and_process() {
+  local port="$1"
   local listen process
-  if ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
+  if [[ "$port" != "-" ]] && command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
     listen="yes"
   else
     listen="no"
   fi
-  process="$(ss -ltnp "sport = :$port" 2>/dev/null | awk -F'users:\\(' 'NR>1 {gsub(/[)]$/, "", $2); print $2; exit}')"
-  [[ -n "$process" ]] || process="-"
-  printf "%-10s %-38s %-8s %-14s %-8s %s\n" "$kind" "$unit" "$port" "probe-only" "$listen" "$process"
+  process="-"
+  if [[ "$port" != "-" ]] && command -v ss >/dev/null 2>&1; then
+    process="$(ss -ltnp "sport = :$port" 2>/dev/null | awk -F'users:\\(' 'NR>1 {gsub(/[)]$/, "", $2); print $2; exit}')"
+    [[ -n "$process" ]] || process="-"
+  fi
+  printf "%s\t%s" "$listen" "$process"
+}
+
+write_status_snapshot_json() {
+  local tsv_path="$1"
+  local json_path="$2"
+  local tmp_json
+  tmp_json="$(mktemp)"
+  {
+    printf "{\n"
+    printf "  \"generated_at_unix_ms\": %s,\n" "$(now_unix_ms)"
+    printf "  \"rows\": [\n"
+    local first=1
+    while IFS=$'\t' read -r kind unit port state listen process exists; do
+      [[ -n "$kind" ]] || continue
+      if [[ "$first" == "0" ]]; then
+        printf ",\n"
+      fi
+      first=0
+      printf "    {\"kind\":\"%s\",\"unit\":\"%s\",\"port\":\"%s\",\"state\":\"%s\",\"listen\":\"%s\",\"process\":\"%s\",\"exists\":\"%s\"}" \
+        "$(json_escape "$kind")" "$(json_escape "$unit")" "$(json_escape "$port")" "$(json_escape "$state")" \
+        "$(json_escape "$listen")" "$(json_escape "$process")" "$(json_escape "$exists")"
+    done <"$tsv_path"
+    printf "\n  ]\n"
+    printf "}\n"
+  } >"$tmp_json"
+  mv "$tmp_json" "$json_path"
+}
+
+refresh_status_snapshot() {
+  local tsv_path json_path
+  tsv_path="$(status_snapshot_tsv_path)"
+  json_path="$(status_snapshot_json_path)"
+  : >"$tsv_path"
+  while IFS= read -r unit; do
+    [[ -n "$unit" ]] || continue
+    local kind exists port state listen_process listen process
+    kind="$(unit_kind "$unit")"
+    [[ "$kind" == "unknown" ]] && continue
+    if unit_exists_in_system "$unit"; then
+      exists="yes"
+    else
+      exists="no"
+    fi
+    port="$(unit_port "$unit")"
+    state="$(unit_state "$unit")"
+    listen_process="$(port_listen_and_process "$port")"
+    listen="${listen_process%%$'\t'*}"
+    process="${listen_process#*$'\t'}"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$kind" "$unit" "$port" "$state" "$listen" "$process" "$exists" >>"$tsv_path"
+  done < <(discover_status_units | awk '{gsub(/\r/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); if ($0 != "") print $0}' | sort -u)
+  sort -u "$tsv_path" -o "$tsv_path"
+  write_status_snapshot_json "$tsv_path" "$json_path"
+}
+
+status_show_kind() {
+  local kind="$1"
+  refresh_status_snapshot >/dev/null
+  printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n" "kind" "unit" "port" "state" "listen" "exists" "process"
+  awk -F '\t' -v k="$kind" '$1 == k { printf "%-10s %-38s %-8s %-14s %-8s %-7s %s\n", $1, $2, $3, $4, $5, $7, $6 }' "$(status_snapshot_tsv_path)"
 }
 
 init_show() {
@@ -1316,7 +1399,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) router_on "$@" ;;
-        show) show_services "router" '^mittens-router[.]service$' ;;
+        show) status_show_kind "router" ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1335,7 +1418,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) server_on "$@" ;;
-        show) show_services "backend" '^mittens-backend-.*[.]service$' ;;
+        show) status_show_kind "backend" ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1354,7 +1437,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) run_renderer_foreground "$@" ;;
-        show) show_services "renderer" '^mittens-renderer-.*[.]service$' ;;
+        show) status_show_kind "renderer" ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
