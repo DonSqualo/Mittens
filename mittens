@@ -36,7 +36,7 @@ Usage:
   mittens renderer systemd off --renderer-id ID
   mittens renderer systemd start|stop|restart|status|logs --renderer-id ID
 
-  mittens status [-router|-server|-backend|-renderer]
+  mittens status [-router|-server|-renderer]
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -1408,10 +1408,10 @@ status_kind_from_flag() {
   case "$flag" in
     ""|all) echo "all" ;;
     -router|router) echo "router" ;;
-    -server|-backend|server|backend) echo "backend" ;;
+    -server|server) echo "backend" ;;
     -renderer|renderer) echo "renderer" ;;
     *)
-      die "unknown status filter '$flag' (expected: -router|-server|-backend|-renderer)"
+      die "unknown status filter '$flag' (expected: -router|-server|-renderer)"
       ;;
   esac
 }
