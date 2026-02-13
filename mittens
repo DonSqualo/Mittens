@@ -1104,7 +1104,7 @@ ensure_port_available_for_unit() {
 
 unit_exists() {
   local unit="$1"
-  systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$unit"
+  systemctl --user list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "$unit"
 }
 
 status_cmd() {
@@ -1170,22 +1170,116 @@ show_services() {
   local category="$1"
   local units_pattern="$2"
 
-  command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
-  printf "%-10s %-38s %-8s %-10s %s\n" "kind" "unit" "port" "state" "exec"
+  command -v ss >/dev/null 2>&1 || die "ss not found"
+  printf "%-10s %-38s %-8s %-14s %-8s %s\n" "kind" "unit" "port" "state" "listen" "process"
   local found=0
+  local units_output=""
+  if command -v systemctl >/dev/null 2>&1; then
+    units_output="$(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null || true)"
+  fi
+
   while IFS= read -r unit; do
     [[ -n "$unit" ]] || continue
     found=1
-    local state exec port
-    state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+    local active_state sub_state state exec port listen process
+    active_state="$(systemctl --user show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+    sub_state="$(systemctl --user show "$unit" --property=SubState --value 2>/dev/null || true)"
+    state="${active_state:-unknown}/${sub_state:-unknown}"
     exec="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
     port="$(printf "%s" "$exec" | sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' | head -n1)"
     [[ -n "$port" ]] || port="-"
-    printf "%-10s %-38s %-8s %-10s %s\n" "$category" "$unit" "$port" "${state:-unknown}" "$exec"
-  done < <(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk -v p="$units_pattern" '$1 ~ p {print $1}')
+    if [[ "$port" != "-" ]] && command -v ss >/dev/null 2>&1; then
+      if ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
+        listen="yes"
+      else
+        listen="no"
+      fi
+      process="$(ss -ltnp "sport = :$port" 2>/dev/null | awk -F'users:\\(' 'NR>1 {gsub(/[)]$/, "", $2); print $2; exit}')"
+      [[ -n "$process" ]] || process="-"
+    else
+      listen="-"
+      process="-"
+    fi
+    printf "%-10s %-38s %-8s %-14s %-8s %s\n" "$category" "$unit" "$port" "$state" "$listen" "$process"
+  done < <(printf "%s\n" "$units_output" | awk -v p="$units_pattern" '$1 ~ p {print $1}')
   if [[ "$found" == "0" ]]; then
-    printf "%-10s %-38s %-8s %-10s %s\n" "$category" "-" "-" "none" "no matching units"
+    show_services_by_port_fallback "$category"
   fi
+}
+
+show_services_by_port_fallback() {
+  local category="$1"
+  case "$category" in
+    router)
+      print_port_probe_row "router" "mittens-router.service" "3100"
+      ;;
+    backend)
+      local printed=0
+      local registry_path="$DEFAULT_REGISTRY_PATH"
+      if [[ -f "$registry_path" ]]; then
+        while IFS='|' read -r backend_id backend_port; do
+          [[ -n "$backend_id" && -n "$backend_port" ]] || continue
+          print_port_probe_row "backend" "mittens-backend-${backend_id}.service" "$backend_port"
+          printed=1
+        done < <(awk '
+          /"backend_id"[[:space:]]*:/ {
+            if (match($0, /"backend_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+              id = substr($0, RSTART, RLENGTH)
+              sub(/.*"backend_id"[[:space:]]*:[[:space:]]*"/, "", id)
+              sub(/".*/, "", id)
+            }
+          }
+          /"backend_port"[[:space:]]*:/ {
+            if (match($0, /"backend_port"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+              port = substr($0, RSTART, RLENGTH)
+              sub(/.*"backend_port"[[:space:]]*:[[:space:]]*/, "", port)
+              if (id != "" && port != "") {
+                print id "|" port
+                id=""
+              }
+            }
+          }
+        ' "$registry_path")
+      fi
+      if [[ "$printed" == "0" ]]; then
+        printf "%-10s %-38s %-8s %-14s %-8s %s\n" "backend" "-" "-" "probe-only" "-" "no registry backends"
+      fi
+      ;;
+    renderer)
+      local printed=0
+      local unit_file
+      for unit_file in "$DEFAULT_SYSTEMD_USER_DIR"/mittens-renderer-*.service; do
+        [[ -f "$unit_file" ]] || continue
+        local unit_name renderer_port
+        unit_name="$(basename "$unit_file")"
+        renderer_port="$(sed -n 's/.* --port \([0-9][0-9]*\).*/\1/p' "$unit_file" | head -n1)"
+        [[ -n "$renderer_port" ]] || continue
+        print_port_probe_row "renderer" "$unit_name" "$renderer_port"
+        printed=1
+      done
+      if [[ "$printed" == "0" ]]; then
+        print_port_probe_row "renderer" "mittens-renderer-local.service" "3000"
+      fi
+      ;;
+    *)
+      printf "%-10s %-38s %-8s %-14s %-8s %s\n" "$category" "-" "-" "probe-only" "-" "unsupported category"
+      ;;
+  esac
+}
+
+print_port_probe_row() {
+  local kind="$1"
+  local unit="$2"
+  local port="$3"
+  local listen process
+  if ss -ltn "sport = :$port" 2>/dev/null | awk 'NR>1 {found=1} END {exit(found?0:1)}'; then
+    listen="yes"
+  else
+    listen="no"
+  fi
+  process="$(ss -ltnp "sport = :$port" 2>/dev/null | awk -F'users:\\(' 'NR>1 {gsub(/[)]$/, "", $2); print $2; exit}')"
+  [[ -n "$process" ]] || process="-"
+  printf "%-10s %-38s %-8s %-14s %-8s %s\n" "$kind" "$unit" "$port" "probe-only" "$listen" "$process"
 }
 
 init_show() {
