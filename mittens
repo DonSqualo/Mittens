@@ -1108,9 +1108,9 @@ unit_exists() {
 }
 
 status_cmd() {
-  show_services "router" '^mittens-router\.service$'
-  show_services "backend" '^mittens-backend-.*\.service$'
-  show_services "renderer" '^mittens-renderer-.*\.service$'
+  show_services "router" '^mittens-router[.]service$'
+  show_services "backend" '^mittens-backend-.*[.]service$'
+  show_services "renderer" '^mittens-renderer-.*[.]service$'
 }
 
 maybe_restart_services() {
@@ -1172,8 +1172,10 @@ show_services() {
 
   command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
   printf "%-10s %-38s %-8s %-10s %s\n" "kind" "unit" "port" "state" "exec"
+  local found=0
   while IFS= read -r unit; do
     [[ -n "$unit" ]] || continue
+    found=1
     local state exec port
     state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
     exec="$(systemctl --user show "$unit" --property=ExecStart --value 2>/dev/null || true)"
@@ -1181,6 +1183,9 @@ show_services() {
     [[ -n "$port" ]] || port="-"
     printf "%-10s %-38s %-8s %-10s %s\n" "$category" "$unit" "$port" "${state:-unknown}" "$exec"
   done < <(systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk -v p="$units_pattern" '$1 ~ p {print $1}')
+  if [[ "$found" == "0" ]]; then
+    printf "%-10s %-38s %-8s %-10s %s\n" "$category" "-" "-" "none" "no matching units"
+  fi
 }
 
 init_show() {
@@ -1213,7 +1218,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) router_on "$@" ;;
-        show) show_services "router" '^mittens-router\.service$' ;;
+        show) show_services "router" '^mittens-router[.]service$' ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1232,7 +1237,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) server_on "$@" ;;
-        show) show_services "backend" '^mittens-backend-.*\.service$' ;;
+        show) show_services "backend" '^mittens-backend-.*[.]service$' ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
@@ -1251,7 +1256,7 @@ main() {
       [[ $# -gt 0 ]] && shift
       case "$action" in
         on) run_renderer_foreground "$@" ;;
-        show) show_services "renderer" '^mittens-renderer-.*\.service$' ;;
+        show) show_services "renderer" '^mittens-renderer-.*[.]service$' ;;
         systemd)
           local systemd_action="${1:-}"
           [[ $# -gt 0 ]] && shift
