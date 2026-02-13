@@ -40,7 +40,7 @@ Usage:
   mittens renderer show
 
   mittens init show
-  mittens status [-router|-server|-backend|-renderer]
+  mittens status [--json] [-router|-server|-backend|-renderer]
 
   mittens nginx snippet [--router-port N] [--output FILE]
   mittens help
@@ -1119,6 +1119,11 @@ status_cmd() {
   fi
 }
 
+status_json_cmd() {
+  refresh_status_snapshot >/dev/null
+  cat "$(status_snapshot_json_path)"
+}
+
 maybe_restart_services() {
   local backend_id="$1"
   local project_file="$2"
@@ -1408,7 +1413,25 @@ main() {
       fi
       ;;
     status)
-      status_cmd "$(status_kind_from_flag "${1:-}")"
+      local kind_filter="all"
+      local output_mode="table"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json|-j)
+            output_mode="json"
+            shift
+            ;;
+          *)
+            kind_filter="$(status_kind_from_flag "$1")"
+            shift
+            ;;
+        esac
+      done
+      if [[ "$output_mode" == "json" ]]; then
+        status_json_cmd
+      else
+        status_cmd "$kind_filter"
+      fi
       ;;
     router)
       local action="${1:-}"

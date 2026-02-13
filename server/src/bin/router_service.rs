@@ -144,6 +144,23 @@ struct UnitStatus {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct StatusSnapshot {
+    rows: Vec<StatusRow>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct StatusRow {
+    #[serde(rename = "kind")]
+    _kind: String,
+    unit: String,
+    port: String,
+    state: String,
+    listen: String,
+    process: String,
+    exists: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RendererServiceConfig {
     renderer_id: String,
@@ -1106,14 +1123,43 @@ async fn build_graph_response(
             .then(a.backend_id.cmp(&b.backend_id))
     });
 
+    let status_rows = query_status_rows_from_mittens().await;
+    let mut status_rows_by_unit: HashMap<String, StatusRow> = HashMap::new();
+    for row in status_rows {
+        status_rows_by_unit.insert(row.unit.clone(), row);
+    }
+
     let mut services = Vec::new();
-    services.push(service_node("router", "router", "mittens-router.service").await);
+    services.push(
+        service_node(
+            "router",
+            "router",
+            "mittens-router.service",
+            status_rows_by_unit.get("mittens-router.service"),
+        )
+        .await,
+    );
     for backend in &backends {
-        services.push(service_node("backend", &backend.backend_id, &backend.systemd_unit).await);
+        services.push(
+            service_node(
+                "backend",
+                &backend.backend_id,
+                &backend.systemd_unit,
+                status_rows_by_unit.get(&backend.systemd_unit),
+            )
+            .await,
+        );
     }
     for renderer in &renderers {
-        services
-            .push(service_node("renderer", &renderer.renderer_id, &renderer.systemd_unit).await);
+        services.push(
+            service_node(
+                "renderer",
+                &renderer.renderer_id,
+                &renderer.systemd_unit,
+                status_rows_by_unit.get(&renderer.systemd_unit),
+            )
+            .await,
+        );
     }
     services.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.id.cmp(&b.id)));
 
@@ -1128,7 +1174,40 @@ async fn build_graph_response(
     }
 }
 
-async fn service_node(kind: &str, id: &str, systemd_unit: &str) -> ServiceNode {
+async fn service_node(
+    kind: &str,
+    id: &str,
+    systemd_unit: &str,
+    status_row: Option<&StatusRow>,
+) -> ServiceNode {
+    if let Some(row) = status_row {
+        let (active_state, sub_state) = parse_state_parts(&row.state);
+        let configured_port = row.port.parse::<u16>().ok();
+        let listening_process = non_dash(&row.process);
+        let healthy = row.listen == "yes";
+        return ServiceNode {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            systemd_unit: systemd_unit.to_string(),
+            configured_port,
+            listening_process,
+            load_state: Some(if row.exists == "yes" {
+                "loaded".to_string()
+            } else {
+                "not-found".to_string()
+            }),
+            active_state,
+            sub_state,
+            unit_file_state: Some(if row.exists == "yes" {
+                "enabled".to_string()
+            } else {
+                "missing".to_string()
+            }),
+            healthy,
+            error: None,
+        };
+    }
+
     let status = query_systemd_unit_status(systemd_unit).await;
     let healthy = status.healthy();
     let configured_port = configured_port_for_unit(systemd_unit);
@@ -1145,6 +1224,39 @@ async fn service_node(kind: &str, id: &str, systemd_unit: &str) -> ServiceNode {
         unit_file_state: status.unit_file_state,
         healthy,
         error: status.error,
+    }
+}
+
+async fn query_status_rows_from_mittens() -> Vec<StatusRow> {
+    let output_result = timeout(
+        Duration::from_millis(1600),
+        Command::new("./mittens").arg("status").arg("--json").output(),
+    )
+    .await;
+
+    let output = match output_result {
+        Ok(Ok(output)) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    serde_json::from_slice::<StatusSnapshot>(&output.stdout)
+        .map(|snapshot| snapshot.rows)
+        .unwrap_or_default()
+}
+
+fn parse_state_parts(state: &str) -> (Option<String>, Option<String>) {
+    if let Some((active, sub)) = state.split_once('/') {
+        return (non_dash(active), non_dash(sub));
+    }
+    (non_dash(state), None)
+}
+
+fn non_dash(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
