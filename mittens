@@ -179,6 +179,9 @@ resolve_project_file() {
   local candidate_abs
   candidate_abs="$(readlink -f "$candidate" 2>/dev/null || true)"
   [[ -n "$candidate_abs" ]] || die "project file not found: $candidate"
+  [[ -f "$candidate_abs" ]] || die "project path is not a file: $candidate_abs"
+  [[ -r "$candidate_abs" ]] || die "project file is not readable: $candidate_abs"
+  [[ "$candidate_abs" == *.lua ]] || die "project file must end with .lua: $candidate_abs"
 
   case "$candidate_abs" in
     "$projects_root_abs"/*) ;;
