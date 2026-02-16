@@ -5,7 +5,7 @@ edition = "2021"
 description = "Development server for Mittens CAD with file watching and Lua execution"
 
 [features]
-default = ["manifold-support"]
+default = ["manifold-support", "occt-support"]
 manifold-support = ["dep:manifold3d"]
 occt-support = ["dep:opencascade"]
 
