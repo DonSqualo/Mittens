@@ -887,9 +887,9 @@ pub fn generate_mesh_from_lua_manifold_clean(_lua: &Lua, value: &Value, circular
 fn manifold_transform_from_ir(transform: &ir::TransformIr) -> Matrix4x3 {
     let m = transform.matrix;
     Matrix4x3::new([
-        Vec3::new(m[0][0], m[0][1], m[0][2]),
-        Vec3::new(m[1][0], m[1][1], m[1][2]),
-        Vec3::new(m[2][0], m[2][1], m[2][2]),
+        Vec3::new(m[0][0], m[1][0], m[2][0]),
+        Vec3::new(m[0][1], m[1][1], m[2][1]),
+        Vec3::new(m[0][2], m[1][2], m[2][2]),
         Vec3::new(m[0][3], m[1][3], m[2][3]),
     ])
 }
@@ -1182,7 +1182,9 @@ pub fn generate_mesh_from_ir_scene(
     if meshes.is_empty() {
         return Err(anyhow!("No objects in scene"));
     }
-    Ok(combine_meshes(meshes))
+    let mut mesh = combine_meshes(meshes);
+    remove_degenerate_triangles(&mut mesh);
+    Ok(mesh)
 }
 
 /// Generate mesh from one canonical IR object, optionally resolving instances against scene components.
@@ -1193,7 +1195,9 @@ pub fn generate_mesh_from_ir_object(
     circular_segments: u32,
 ) -> Result<MeshData> {
     let components = scene.map(component_map_from_ir_scene).unwrap_or_default();
-    build_mesh_recursive_from_ir(lua, obj, circular_segments, &components)
+    let mut mesh = build_mesh_recursive_from_ir(lua, obj, circular_segments, &components)?;
+    remove_degenerate_triangles(&mut mesh);
+    Ok(mesh)
 }
 
 /// Generate mesh from a single serialized object using Manifold
