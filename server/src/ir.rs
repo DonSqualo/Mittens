@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use mlua::{Lua, Table, Value};
+use mlua::{Table, Value};
 use serde::Serialize;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
@@ -22,8 +22,7 @@ pub struct ObjectIr {
     pub component: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<JsonValue>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ops: Vec<TransformOpIr>,
+    pub transform: TransformIr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,12 +31,24 @@ pub struct ObjectIr {
     pub children: Vec<ObjectIr>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TransformOpIr {
-    pub op: String,
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TransformIr {
+    pub matrix: [[f64; 4]; 4],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransformOp {
+    op: TransformOpType,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransformOpType {
+    Translate,
+    Rotate,
+    Scale,
 }
 
 pub fn scene_from_lua_value(value: &Value) -> Result<SceneIr> {
@@ -109,7 +120,7 @@ pub fn object_from_lua_table(table: &Table) -> Result<ObjectIr> {
         .transpose()?
         .filter(|v| !v.is_null());
 
-    let ops = canonicalize_ops(table.get::<_, Table>("ops").ok())?;
+    let transform = canonicalize_transform(table.get::<_, Table>("ops").ok())?;
 
     let mut children = if let Ok(child_table) = table.get::<_, Table>("children") {
         let mut indexed_children: Vec<(i64, ObjectIr)> = Vec::new();
@@ -141,56 +152,11 @@ pub fn object_from_lua_table(table: &Table) -> Result<ObjectIr> {
         operation,
         component,
         params,
-        ops,
+        transform,
         material,
         color,
         children,
     })
-}
-
-pub fn object_to_lua_table<'lua>(lua: &'lua Lua, obj: &ObjectIr) -> Result<Table<'lua>> {
-    let t = lua.create_table()?;
-    t.set("type", obj.obj_type.clone())?;
-
-    if let Some(name) = &obj.name {
-        t.set("name", name.clone())?;
-    }
-    if let Some(operation) = &obj.operation {
-        t.set("operation", operation.clone())?;
-    }
-    if let Some(component) = &obj.component {
-        t.set("component", component.clone())?;
-    }
-    if let Some(params) = &obj.params {
-        t.set("params", json_to_lua_value(lua, params)?)?;
-    }
-    if !obj.ops.is_empty() {
-        let ops = lua.create_table()?;
-        for (i, op) in obj.ops.iter().enumerate() {
-            let ot = lua.create_table()?;
-            ot.set("op", op.op.clone())?;
-            ot.set("x", op.x)?;
-            ot.set("y", op.y)?;
-            ot.set("z", op.z)?;
-            ops.set((i + 1) as i64, ot)?;
-        }
-        t.set("ops", ops)?;
-    }
-    if let Some(material) = &obj.material {
-        t.set("material", json_to_lua_value(lua, material)?)?;
-    }
-    if let Some(color) = &obj.color {
-        t.set("color", json_to_lua_value(lua, color)?)?;
-    }
-    if !obj.children.is_empty() {
-        let children = lua.create_table()?;
-        for (i, child) in obj.children.iter().enumerate() {
-            children.set((i + 1) as i64, object_to_lua_table(lua, child)?)?;
-        }
-        t.set("children", children)?;
-    }
-
-    Ok(t)
 }
 
 pub fn scene_hash(scene: &SceneIr) -> Result<String> {
@@ -206,29 +172,56 @@ pub fn stable_hash_hex(input: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn canonicalize_ops(ops: Option<Table>) -> Result<Vec<TransformOpIr>> {
+fn canonicalize_transform(ops: Option<Table>) -> Result<TransformIr> {
     let mut indexed = Vec::new();
     if let Some(ops) = ops {
         for pair in ops.pairs::<i64, Table>() {
             let (idx, op_table) = pair?;
-            let op: String = op_table.get("op").unwrap_or_default();
-            if op != "translate" && op != "rotate" && op != "scale" {
-                continue;
-            }
+            let op_name: String = op_table.get("op").unwrap_or_default();
+            let op = match op_name.as_str() {
+                "translate" => TransformOpType::Translate,
+                "rotate" => TransformOpType::Rotate,
+                "scale" => TransformOpType::Scale,
+                _ => continue,
+            };
             indexed.push((
                 idx,
-                TransformOpIr {
+                TransformOp {
                     op,
-                    x: round_f64(op_table.get("x").unwrap_or(0.0)),
-                    y: round_f64(op_table.get("y").unwrap_or(0.0)),
-                    z: round_f64(op_table.get("z").unwrap_or(0.0)),
+                    x: op_table.get("x").unwrap_or(0.0),
+                    y: op_table.get("y").unwrap_or(0.0),
+                    z: op_table.get("z").unwrap_or(0.0),
                 },
             ));
         }
     }
 
     indexed.sort_by_key(|(idx, _)| *idx);
-    Ok(indexed.into_iter().map(|(_, op)| op).collect())
+    let ops: Vec<TransformOp> = indexed.into_iter().map(|(_, op)| op).collect();
+    Ok(TransformIr::from_ops(&ops))
+}
+
+impl TransformIr {
+    pub fn identity() -> Self {
+        Self {
+            matrix: identity_matrix(),
+        }
+    }
+
+    fn from_ops(ops: &[TransformOp]) -> Self {
+        let mut matrix = identity_matrix();
+        for op in ops {
+            let op_matrix = match op.op {
+                TransformOpType::Translate => translation_matrix(op.x, op.y, op.z),
+                TransformOpType::Rotate => rotation_zyx_matrix(op.x, op.y, op.z),
+                TransformOpType::Scale => scale_matrix(op.x, op.y, op.z),
+            };
+            matrix = mat_mul(op_matrix, matrix);
+        }
+        Self {
+            matrix: round_matrix(matrix),
+        }
+    }
 }
 
 fn canonicalize_value(value: Value) -> Result<JsonValue> {
@@ -258,7 +251,9 @@ fn canonicalize_table(table: Table) -> Result<JsonValue> {
 
         match key {
             Value::Integer(i) if i > 0 => array_entries.push((i, canonical)),
-            Value::Number(n) if n.fract() == 0.0 && n > 0.0 => array_entries.push((n as i64, canonical)),
+            Value::Number(n) if n.fract() == 0.0 && n > 0.0 => {
+                array_entries.push((n as i64, canonical))
+            }
             Value::String(s) => {
                 saw_non_array = true;
                 map_entries.insert(s.to_str()?.to_string(), canonical);
@@ -294,35 +289,6 @@ fn canonicalize_table(table: Table) -> Result<JsonValue> {
     Ok(JsonValue::Object(map))
 }
 
-fn json_to_lua_value<'lua>(lua: &'lua Lua, value: &JsonValue) -> Result<Value<'lua>> {
-    Ok(match value {
-        JsonValue::Null => Value::Nil,
-        JsonValue::Bool(b) => Value::Boolean(*b),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Integer(i)
-            } else {
-                Value::Number(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        JsonValue::String(s) => Value::String(lua.create_string(s)?),
-        JsonValue::Array(arr) => {
-            let t = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                t.set((i + 1) as i64, json_to_lua_value(lua, v)?)?;
-            }
-            Value::Table(t)
-        }
-        JsonValue::Object(map) => {
-            let t = lua.create_table()?;
-            for (k, v) in map {
-                t.set(k.as_str(), json_to_lua_value(lua, v)?)?;
-            }
-            Value::Table(t)
-        }
-    })
-}
-
 fn round_f64(value: f64) -> f64 {
     let scaled = (value * 1_000_000_000.0).round() / 1_000_000_000.0;
     if scaled == -0.0 {
@@ -330,4 +296,67 @@ fn round_f64(value: f64) -> f64 {
     } else {
         scaled
     }
+}
+
+fn round_matrix(mut matrix: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
+    for row in &mut matrix {
+        for v in row {
+            *v = round_f64(*v);
+        }
+    }
+    matrix
+}
+
+fn identity_matrix() -> [[f64; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn translation_matrix(x: f64, y: f64, z: f64) -> [[f64; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, x],
+        [0.0, 1.0, 0.0, y],
+        [0.0, 0.0, 1.0, z],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn scale_matrix(x: f64, y: f64, z: f64) -> [[f64; 4]; 4] {
+    [
+        [x, 0.0, 0.0, 0.0],
+        [0.0, y, 0.0, 0.0],
+        [0.0, 0.0, z, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn rotation_zyx_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [[f64; 4]; 4] {
+    let rx = rx_deg.to_radians();
+    let ry = ry_deg.to_radians();
+    let rz = rz_deg.to_radians();
+
+    let (sx, cx) = rx.sin_cos();
+    let (sy, cy) = ry.sin_cos();
+    let (sz, cz) = rz.sin_cos();
+
+    [
+        [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz, 0.0],
+        [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz, 0.0],
+        [-sy, sx * cy, cx * cy, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn mat_mul(a: [[f64; 4]; 4], b: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
+    let mut out = [[0.0; 4]; 4];
+    for r in 0..4 {
+        for c in 0..4 {
+            out[r][c] = (0..4).map(|k| a[r][k] * b[k][c]).sum();
+        }
+    }
+    out
 }
