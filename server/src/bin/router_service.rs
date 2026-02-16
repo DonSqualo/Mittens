@@ -763,7 +763,11 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       }
     });
 
+    let refreshInFlight = { active: false };
+
     async function refresh() {
+      if (refreshInFlight.active) return;
+      refreshInFlight.active = true;
       try {
         const res = await fetch('/api/graph', { cache: 'no-store' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -772,11 +776,13 @@ const GRAPH_PAGE_HTML: &str = r#"<!doctype html>
       } catch (err) {
         document.getElementById('renderers').innerHTML = '<div class="empty">Failed to load</div>';
         document.getElementById('backends').innerHTML = '<div class="empty">' + esc(err) + '</div>';
+      } finally {
+        refreshInFlight.active = false;
       }
     }
 
     refresh();
-    setInterval(refresh, 1500);
+    setInterval(refresh, 5000);
   </script>
 </body>
 </html>
