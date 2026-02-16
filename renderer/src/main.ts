@@ -383,6 +383,20 @@ function refresh_download_button_state() {
   set_download_button_enabled(current_export_files.length > 0);
 }
 
+function refresh_download_button_label() {
+  if (!download_stl_btn) return;
+  if (current_export_files.length > 1) {
+    download_stl_btn.textContent = 'ZIP';
+    return;
+  }
+  if (current_export_files.length === 1) {
+    const f = current_export_files[0].toLowerCase();
+    download_stl_btn.textContent = f.endsWith('.step') || f.endsWith('.stp') ? 'STEP' : 'STL';
+    return;
+  }
+  download_stl_btn.textContent = 'STL';
+}
+
 function try_handle_export_packet(buffer: ArrayBuffer): boolean {
   if (buffer.byteLength < 17) return false;
   const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 8));
@@ -402,9 +416,12 @@ function try_handle_export_packet(buffer: ArrayBuffer): boolean {
   if (buffer.byteLength < offset + payloadLen) return true;
   const payload = buffer.slice(offset, offset + payloadLen);
 
-  const blob = new Blob([payload], {
-    type: filename.toLowerCase().endsWith('.zip') ? 'application/zip' : 'model/stl'
-  });
+  const lower = filename.toLowerCase();
+  const mime =
+    lower.endsWith('.zip') ? 'application/zip' :
+    lower.endsWith('.step') || lower.endsWith('.stp') ? 'model/step' :
+    'model/stl';
+  const blob = new Blob([payload], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -1414,16 +1431,12 @@ function connect_websocket() {
           current_export_files = Array.isArray(msg.exports)
             ? msg.exports.filter((v: unknown) => typeof v === 'string')
             : [];
-          if (download_stl_btn) {
-            download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
-          }
+          refresh_download_button_label();
           refresh_download_button_state();
           update_status('connected');
         } else if (msg.type === 'exports' && Array.isArray(msg.files)) {
           current_export_files = msg.files.filter((v: unknown) => typeof v === 'string');
-          if (download_stl_btn) {
-            download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
-          }
+          refresh_download_button_label();
           refresh_download_button_state();
         }
       } catch (e) {
