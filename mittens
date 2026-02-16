@@ -19,7 +19,7 @@ usage() {
   cat <<'EOF'
 Usage:
   # Canonical surface:
-  mittens init PROJECT.lua [--backend-id ID] [--projects-root PATH] [--worktree PATH] [--registry PATH] [--router-port N] [--renderer-id ID] [--renderer-port N] [--renderer-host HOST] [--backend-port N] [--owner NAME] [--branch NAME] [--nginx-snippet-output FILE] [--nginx-service NAME] [--no-nginx]
+  mittens init PROJECT.(lua|stl|step|stp) [--backend-id ID] [--projects-root PATH] [--worktree PATH] [--registry PATH] [--router-port N] [--renderer-id ID] [--renderer-port N] [--renderer-host HOST] [--backend-port N] [--owner NAME] [--branch NAME] [--nginx-snippet-output FILE] [--nginx-service NAME] [--no-nginx]
 
   mittens router on [--registry PATH] [--port N] [--log FILE] [--pid-file FILE]
   mittens router systemd on [--registry PATH] [--port N]
@@ -177,7 +177,10 @@ resolve_project_file() {
   [[ -n "$candidate_abs" ]] || die "project file not found: $candidate"
   [[ -f "$candidate_abs" ]] || die "project path is not a file: $candidate_abs"
   [[ -r "$candidate_abs" ]] || die "project file is not readable: $candidate_abs"
-  [[ "$candidate_abs" == *.lua ]] || die "project file must end with .lua: $candidate_abs"
+  case "$candidate_abs" in
+    *.lua|*.stl|*.step|*.stp) ;;
+    *) die "project file must end with .lua, .stl, .step, or .stp: $candidate_abs" ;;
+  esac
 
   case "$candidate_abs" in
     "$projects_root_abs"/*) ;;
@@ -204,7 +207,7 @@ default_backend_id_from_project() {
   local project_file="$1"
   local base
   base="$(basename "$project_file")"
-  base="${base%.lua}"
+  base="${base%.*}"
   sanitize_unit_id "$base"
 }
 
@@ -317,14 +320,14 @@ init_cmd() {
         if [[ -z "$project_file" ]]; then
           project_file="$1"
         else
-          die "unexpected positional argument '$1' (expected only PROJECT.lua)"
+          die "unexpected positional argument '$1' (expected only PROJECT.(lua|stl|step|stp))"
         fi
         shift
         ;;
     esac
   done
 
-  [[ -n "$project_file" ]] || die "missing required PROJECT.lua argument"
+  [[ -n "$project_file" ]] || die "missing required PROJECT.(lua|stl|step|stp) argument"
   [[ -n "$backend_id" ]] || backend_id="$(default_backend_id_from_project "$project_file")"
   [[ -n "$backend_port" ]] || backend_port="$(default_backend_port_from_id "$backend_id")"
   project_file="$(resolve_project_file "$project_file" "$projects_root")"

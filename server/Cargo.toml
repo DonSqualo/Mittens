@@ -7,6 +7,7 @@ description = "Development server for Mittens CAD with file watching and Lua exe
 [features]
 default = ["manifold-support"]
 manifold-support = ["dep:manifold3d"]
+occt-support = ["dep:opencascade"]
 
 [dependencies]
 # Web server
@@ -38,6 +39,8 @@ chrono = "0.4"
 
 # CSG geometry
 manifold3d = { version = "0.0.6", optional = true }
+opencascade = { version = "0.2.0", optional = true }
+stl_io = "0.10.0"
 
 # 3MF export (ZIP with XML)
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
