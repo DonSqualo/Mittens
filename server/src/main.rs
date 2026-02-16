@@ -28,6 +28,7 @@ mod circuit;
 mod export;
 mod field;
 mod geometry;
+mod ir;
 mod nanovna;
 mod thread_primitives;
 
@@ -1142,11 +1143,16 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         (false, false, 32, None)
     };
 
-    info!("Using Manifold backend for CSG, circular_segments={}", circular_segments);
-    let mesh = geometry::generate_mesh_from_lua_manifold(lua, &result, circular_segments)?;
+    let scene_ir = ir::scene_from_lua_value(&result)?;
+    let scene_hash = ir::scene_hash(&scene_ir).unwrap_or_else(|_| "unknown".to_string());
+    info!(
+        "Using IR -> Manifold backend, circular_segments={}, scene_hash={}",
+        circular_segments, scene_hash
+    );
+    let mesh = geometry::generate_mesh_from_ir_scene(lua, &scene_ir, circular_segments)?;
 
     let exports = if let Some(table) = result.as_table() {
-        export::process_exports_from_table(lua, table, base_dir)
+        export::process_exports_from_table(lua, table, &scene_ir, base_dir)
     } else {
         Vec::new()
     };
