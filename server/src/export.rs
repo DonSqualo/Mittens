@@ -1,6 +1,7 @@
 //! Export - STL and 3MF file generation for 3D printing
 //! Units: millimeters, manifold meshes
 
+use crate::ir;
 use crate::geometry::MeshData;
 use chrono::Local;
 use std::fs::File;
@@ -231,7 +232,12 @@ fn build_model_xml(mesh: &MeshData, units: &str, include_colors: bool) -> String
 
 /// Process exports from the result table using Manifold backend
 /// Supports STL (binary) and 3MF (ZIP with XML, optional colors)
-pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir: &Path) -> Vec<String> {
+pub fn process_exports_from_table(
+    lua: &mlua::Lua,
+    table: &mlua::Table,
+    scene_ir: &ir::SceneIr,
+    base_dir: &Path,
+) -> Vec<String> {
     use crate::geometry;
 
     let exports = match table.get::<_, mlua::Table>("exports") {
@@ -253,6 +259,13 @@ pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir
                 Ok(o) => o,
                 Err(_) => continue,
             };
+            let ir_object = match ir::object_from_lua_table(&object) {
+                Ok(obj) => obj,
+                Err(e) => {
+                    tracing::error!("IR conversion failed for export {}: {}", filename, e);
+                    continue;
+                }
+            };
 
             let circular_segments: u32 = exp.get("circular_segments").unwrap_or(128);
             let path = base_dir.join(&filename);
@@ -260,7 +273,12 @@ pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir
             match format.as_str() {
                 "stl" => {
                     let output_path = versioned_stl_path(&path);
-                    match geometry::generate_mesh_from_object_manifold(lua, &object, circular_segments) {
+                    match geometry::generate_mesh_from_ir_object(
+                        lua,
+                        &ir_object,
+                        Some(scene_ir),
+                        circular_segments,
+                    ) {
                         Ok(mesh) => {
                             if let Err(e) = write_stl(&mesh, &output_path) {
                                 tracing::error!("STL export failed for {}: {}", filename, e);
@@ -285,7 +303,12 @@ pub fn process_exports_from_table(lua: &mlua::Lua, table: &mlua::Table, base_dir
                 "3mf" => {
                     let units: String = exp.get("units").unwrap_or_else(|_| "millimeter".to_string());
                     let include_colors: bool = exp.get("include_colors").unwrap_or(true);
-                    match geometry::generate_mesh_from_object_manifold(lua, &object, circular_segments) {
+                    match geometry::generate_mesh_from_ir_object(
+                        lua,
+                        &ir_object,
+                        Some(scene_ir),
+                        circular_segments,
+                    ) {
                         Ok(mesh) => {
                             if let Err(e) = write_3mf(&mesh, &path, &units, include_colors) {
                                 tracing::error!("3MF export failed for {}: {}", filename, e);

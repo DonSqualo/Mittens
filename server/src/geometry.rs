@@ -2,6 +2,7 @@
 //! Uses manifold3d for guaranteed watertight manifold meshes
 
 use anyhow::{anyhow, Result};
+use crate::ir;
 use crate::thread_primitives::{generate_external_thread, generate_internal_thread};
 use manifold3d::types::{Matrix4x3, PositiveF64, PositiveI32, Vec3};
 use manifold3d::{Manifold, MeshGL};
@@ -492,8 +493,8 @@ fn apply_manifold_ops(manifold: Manifold, table: &mlua::Table) -> Result<Manifol
     let mut result = manifold;
 
     if let Ok(ops) = table.get::<_, mlua::Table>("ops") {
-        for pair in ops.pairs::<i64, mlua::Table>() {
-            if let Ok((_, op_table)) = pair {
+        for op_item in ops.sequence_values::<mlua::Table>() {
+            if let Ok(op_table) = op_item {
                 let op: String = op_table.get("op").unwrap_or_default();
                 let x: f64 = op_table.get("x").unwrap_or(0.0);
                 let y: f64 = op_table.get("y").unwrap_or(0.0);
@@ -759,8 +760,8 @@ fn build_mesh_recursive_with_components(
 }
 
 fn apply_mesh_transforms(mesh: &mut MeshData, ops: &mlua::Table) -> Result<()> {
-    for pair in ops.clone().pairs::<i64, mlua::Table>() {
-        if let Ok((_, op_table)) = pair {
+    for op_item in ops.clone().sequence_values::<mlua::Table>() {
+        if let Ok(op_table) = op_item {
             let op: String = op_table.get("op").unwrap_or_default();
             let x: f64 = op_table.get("x").unwrap_or(0.0);
             let y: f64 = op_table.get("y").unwrap_or(0.0);
@@ -871,22 +872,8 @@ pub fn generate_mesh_from_lua_manifold(_lua: &Lua, value: &Value, circular_segme
 
 /// Generate mesh from Lua scene using Manifold backend, with optional degenerate triangle removal
 pub fn generate_mesh_from_lua_manifold_clean(_lua: &Lua, value: &Value, circular_segments: u32, remove_degenerates: bool) -> Result<MeshData> {
-    let table = value.as_table().ok_or_else(|| anyhow!("Expected table"))?;
-    let objects: mlua::Table = table.get("objects")?;
-
-    let mut meshes = Vec::new();
-
-    for pair in objects.pairs::<i64, mlua::Table>() {
-        let (_, obj) = pair?;
-        let mesh = build_mesh_recursive(&obj, circular_segments)?;
-        meshes.push(mesh);
-    }
-
-    if meshes.is_empty() {
-        return Err(anyhow!("No objects in scene"));
-    }
-
-    let mut combined = combine_meshes(meshes);
+    let scene = ir::scene_from_lua_value(value)?;
+    let mut combined = generate_mesh_from_ir_scene(_lua, &scene, circular_segments)?;
     if remove_degenerates {
         let removed = remove_degenerate_triangles(&mut combined);
         if removed > 0 {
@@ -894,6 +881,75 @@ pub fn generate_mesh_from_lua_manifold_clean(_lua: &Lua, value: &Value, circular
         }
     }
     Ok(combined)
+}
+
+fn collect_ir_components(obj: &ir::ObjectIr, out: &mut HashMap<String, ir::ObjectIr>) {
+    if obj.obj_type == "component" {
+        if let Some(name) = &obj.name {
+            out.insert(name.clone(), obj.clone());
+        }
+    }
+    for child in &obj.children {
+        collect_ir_components(child, out);
+    }
+}
+
+fn ir_component_lua_tables<'lua>(
+    lua: &'lua Lua,
+    scene: &ir::SceneIr,
+) -> Result<HashMap<String, mlua::Table<'lua>>> {
+    let mut components: HashMap<String, ir::ObjectIr> = HashMap::new();
+    for obj in &scene.objects {
+        collect_ir_components(obj, &mut components);
+    }
+
+    let mut tables = HashMap::new();
+    for (name, obj) in components {
+        tables.insert(name, ir::object_to_lua_table(lua, &obj)?);
+    }
+    Ok(tables)
+}
+
+/// Generate mesh from canonical IR scene using existing Manifold object builder semantics.
+pub fn generate_mesh_from_ir_scene(
+    lua: &Lua,
+    scene: &ir::SceneIr,
+    circular_segments: u32,
+) -> Result<MeshData> {
+    let component_tables = ir_component_lua_tables(lua, scene)?;
+    let mut meshes = Vec::new();
+
+    for obj in &scene.objects {
+        let table = ir::object_to_lua_table(lua, obj)?;
+        let mesh = build_mesh_recursive_with_components(
+            &table,
+            circular_segments,
+            &component_tables,
+        )?;
+        meshes.push(mesh);
+    }
+
+    if meshes.is_empty() {
+        return Err(anyhow!("No objects in scene"));
+    }
+
+    Ok(combine_meshes(meshes))
+}
+
+/// Generate mesh from one canonical IR object, optionally resolving instances against scene components.
+pub fn generate_mesh_from_ir_object(
+    lua: &Lua,
+    obj: &ir::ObjectIr,
+    scene: Option<&ir::SceneIr>,
+    circular_segments: u32,
+) -> Result<MeshData> {
+    let components = if let Some(scene) = scene {
+        ir_component_lua_tables(lua, scene)?
+    } else {
+        HashMap::new()
+    };
+    let table = ir::object_to_lua_table(lua, obj)?;
+    build_mesh_recursive_with_components(&table, circular_segments, &components)
 }
 
 /// Generate mesh from a single serialized object using Manifold
