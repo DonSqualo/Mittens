@@ -7,6 +7,7 @@ use crate::thread_primitives::{generate_external_thread, generate_internal_threa
 use manifold3d::types::{Matrix4x3, PositiveF64, PositiveI32, Vec3};
 use manifold3d::{Manifold, MeshGL};
 use mlua::{Lua, Value};
+use serde_json::Value as JsonValue;
 use std::alloc::{alloc, Layout};
 use std::collections::HashMap;
 use std::os::raw::c_void;
@@ -883,6 +884,164 @@ pub fn generate_mesh_from_lua_manifold_clean(_lua: &Lua, value: &Value, circular
     Ok(combined)
 }
 
+fn manifold_transform_from_ir(transform: &ir::TransformIr) -> Matrix4x3 {
+    let m = transform.matrix;
+    Matrix4x3::new([
+        Vec3::new(m[0][0], m[0][1], m[0][2]),
+        Vec3::new(m[1][0], m[1][1], m[1][2]),
+        Vec3::new(m[2][0], m[2][1], m[2][2]),
+        Vec3::new(m[0][3], m[1][3], m[2][3]),
+    ])
+}
+
+fn apply_manifold_transform_ir(manifold: Manifold, transform: &ir::TransformIr) -> Manifold {
+    manifold.transform(manifold_transform_from_ir(transform))
+}
+
+fn apply_mesh_transform_ir(mesh: &mut MeshData, transform: &ir::TransformIr) {
+    let m = transform.matrix;
+    let lin = [
+        [m[0][0], m[0][1], m[0][2]],
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]],
+    ];
+
+    let det = lin[0][0] * (lin[1][1] * lin[2][2] - lin[1][2] * lin[2][1])
+        - lin[0][1] * (lin[1][0] * lin[2][2] - lin[1][2] * lin[2][0])
+        + lin[0][2] * (lin[1][0] * lin[2][1] - lin[1][1] * lin[2][0]);
+
+    let normal_matrix = if det.abs() > 1e-12 {
+        let inv_det = 1.0 / det;
+        let inv = [
+            [
+                (lin[1][1] * lin[2][2] - lin[1][2] * lin[2][1]) * inv_det,
+                (lin[0][2] * lin[2][1] - lin[0][1] * lin[2][2]) * inv_det,
+                (lin[0][1] * lin[1][2] - lin[0][2] * lin[1][1]) * inv_det,
+            ],
+            [
+                (lin[1][2] * lin[2][0] - lin[1][0] * lin[2][2]) * inv_det,
+                (lin[0][0] * lin[2][2] - lin[0][2] * lin[2][0]) * inv_det,
+                (lin[0][2] * lin[1][0] - lin[0][0] * lin[1][2]) * inv_det,
+            ],
+            [
+                (lin[1][0] * lin[2][1] - lin[1][1] * lin[2][0]) * inv_det,
+                (lin[0][1] * lin[2][0] - lin[0][0] * lin[2][1]) * inv_det,
+                (lin[0][0] * lin[1][1] - lin[0][1] * lin[1][0]) * inv_det,
+            ],
+        ];
+        Some([
+            [inv[0][0], inv[1][0], inv[2][0]],
+            [inv[0][1], inv[1][1], inv[2][1]],
+            [inv[0][2], inv[1][2], inv[2][2]],
+        ])
+    } else {
+        None
+    };
+
+    for i in 0..mesh.positions.len() / 3 {
+        let px = mesh.positions[i * 3] as f64;
+        let py = mesh.positions[i * 3 + 1] as f64;
+        let pz = mesh.positions[i * 3 + 2] as f64;
+        mesh.positions[i * 3] = (m[0][0] * px + m[0][1] * py + m[0][2] * pz + m[0][3]) as f32;
+        mesh.positions[i * 3 + 1] = (m[1][0] * px + m[1][1] * py + m[1][2] * pz + m[1][3]) as f32;
+        mesh.positions[i * 3 + 2] = (m[2][0] * px + m[2][1] * py + m[2][2] * pz + m[2][3]) as f32;
+    }
+
+    for i in 0..mesh.normals.len() / 3 {
+        let nx = mesh.normals[i * 3] as f64;
+        let ny = mesh.normals[i * 3 + 1] as f64;
+        let nz = mesh.normals[i * 3 + 2] as f64;
+        let (tx, ty, tz) = if let Some(nm) = normal_matrix {
+            (
+                nm[0][0] * nx + nm[0][1] * ny + nm[0][2] * nz,
+                nm[1][0] * nx + nm[1][1] * ny + nm[1][2] * nz,
+                nm[2][0] * nx + nm[2][1] * ny + nm[2][2] * nz,
+            )
+        } else {
+            (
+                lin[0][0] * nx + lin[0][1] * ny + lin[0][2] * nz,
+                lin[1][0] * nx + lin[1][1] * ny + lin[1][2] * nz,
+                lin[2][0] * nx + lin[2][1] * ny + lin[2][2] * nz,
+            )
+        };
+        let len = (tx * tx + ty * ty + tz * tz).sqrt();
+        if len > 1e-12 {
+            mesh.normals[i * 3] = (tx / len) as f32;
+            mesh.normals[i * 3 + 1] = (ty / len) as f32;
+            mesh.normals[i * 3 + 2] = (tz / len) as f32;
+        }
+    }
+}
+
+fn parse_rgb_array(value: &JsonValue) -> Option<(f32, f32, f32)> {
+    let arr = value.as_array()?;
+    if arr.len() < 3 {
+        return None;
+    }
+    Some((
+        arr[0].as_f64()? as f32,
+        arr[1].as_f64()? as f32,
+        arr[2].as_f64()? as f32,
+    ))
+}
+
+fn get_material_color_ir(obj: &ir::ObjectIr) -> Option<(f32, f32, f32)> {
+    if let Some(color) = &obj.color {
+        if let Some(rgb) = parse_rgb_array(color) {
+            return Some(rgb);
+        }
+    }
+    if let Some(material) = &obj.material {
+        if let Some(color) = material.as_object().and_then(|m| m.get("color")) {
+            if let Some(rgb) = parse_rgb_array(color) {
+                return Some(rgb);
+            }
+        }
+    }
+    None
+}
+
+fn json_to_lua_value<'lua>(lua: &'lua Lua, value: &JsonValue) -> Result<Value<'lua>> {
+    Ok(match value {
+        JsonValue::Null => Value::Nil,
+        JsonValue::Bool(b) => Value::Boolean(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else {
+                Value::Number(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        JsonValue::String(s) => Value::String(lua.create_string(s)?),
+        JsonValue::Array(arr) => {
+            let t = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                t.set((i + 1) as i64, json_to_lua_value(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+        JsonValue::Object(map) => {
+            let t = lua.create_table()?;
+            for (k, v) in map {
+                t.set(k.as_str(), json_to_lua_value(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+    })
+}
+
+fn build_manifold_primitive_from_ir(lua: &Lua, obj: &ir::ObjectIr, circular_segments: u32) -> Result<Manifold> {
+    let params = obj
+        .params
+        .as_ref()
+        .ok_or_else(|| anyhow!("Primitive '{}' missing params", obj.obj_type))?;
+    let params_table = match json_to_lua_value(lua, params)? {
+        Value::Table(t) => t,
+        _ => return Err(anyhow!("Primitive '{}' params must be table-like", obj.obj_type)),
+    };
+    build_manifold_primitive(&obj.obj_type, &params_table, circular_segments)
+}
+
 fn collect_ir_components(obj: &ir::ObjectIr, out: &mut HashMap<String, ir::ObjectIr>) {
     if obj.obj_type == "component" {
         if let Some(name) = &obj.name {
@@ -894,45 +1053,135 @@ fn collect_ir_components(obj: &ir::ObjectIr, out: &mut HashMap<String, ir::Objec
     }
 }
 
-fn ir_component_lua_tables<'lua>(
-    lua: &'lua Lua,
-    scene: &ir::SceneIr,
-) -> Result<HashMap<String, mlua::Table<'lua>>> {
-    let mut components: HashMap<String, ir::ObjectIr> = HashMap::new();
+fn component_map_from_ir_scene(scene: &ir::SceneIr) -> HashMap<String, ir::ObjectIr> {
+    let mut components = HashMap::new();
     for obj in &scene.objects {
         collect_ir_components(obj, &mut components);
     }
-
-    let mut tables = HashMap::new();
-    for (name, obj) in components {
-        tables.insert(name, ir::object_to_lua_table(lua, &obj)?);
-    }
-    Ok(tables)
+    components
 }
 
-/// Generate mesh from canonical IR scene using existing Manifold object builder semantics.
+fn build_manifold_object_from_ir(
+    lua: &Lua,
+    obj: &ir::ObjectIr,
+    circular_segments: u32,
+    components: &HashMap<String, ir::ObjectIr>,
+) -> Result<Manifold> {
+    let manifold = if obj.obj_type == "csg" {
+        let operation = obj
+            .operation
+            .as_deref()
+            .ok_or_else(|| anyhow!("CSG object missing operation"))?;
+        let first = obj
+            .children
+            .first()
+            .ok_or_else(|| anyhow!("CSG object missing children"))?;
+        let mut result = build_manifold_object_from_ir(lua, first, circular_segments, components)?;
+        for child in obj.children.iter().skip(1) {
+            let child_m = build_manifold_object_from_ir(lua, child, circular_segments, components)?;
+            result = match operation {
+                "union" => result.union(&child_m),
+                "difference" => result.difference(&child_m),
+                "intersect" => result.intersection(&child_m),
+                _ => return Err(anyhow!("Unknown CSG operation: {}", operation)),
+            };
+        }
+        result
+    } else if obj.obj_type == "group" || obj.obj_type == "assembly" || obj.obj_type == "component" {
+        let mut result: Option<Manifold> = None;
+        for child in &obj.children {
+            let child_m = build_manifold_object_from_ir(lua, child, circular_segments, components)?;
+            result = Some(match result {
+                Some(r) => r.union(&child_m),
+                None => child_m,
+            });
+        }
+        result.ok_or_else(|| anyhow!("Empty {}", obj.obj_type))?
+    } else if obj.obj_type == "instance" {
+        let component_name = obj
+            .component
+            .as_deref()
+            .ok_or_else(|| anyhow!("instance missing component reference"))?;
+        let component = components
+            .get(component_name)
+            .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
+        build_manifold_object_from_ir(lua, component, circular_segments, components)?
+    } else {
+        build_manifold_primitive_from_ir(lua, obj, circular_segments)?
+    };
+
+    Ok(apply_manifold_transform_ir(manifold, &obj.transform))
+}
+
+fn build_mesh_recursive_from_ir(
+    lua: &Lua,
+    obj: &ir::ObjectIr,
+    circular_segments: u32,
+    components: &HashMap<String, ir::ObjectIr>,
+) -> Result<MeshData> {
+    if obj.obj_type == "group" || obj.obj_type == "assembly" || obj.obj_type == "component" {
+        let mut child_meshes = Vec::new();
+        for child in &obj.children {
+            child_meshes.push(build_mesh_recursive_from_ir(lua, child, circular_segments, components)?);
+        }
+        if child_meshes.is_empty() {
+            return Err(anyhow!("Empty {}", obj.obj_type));
+        }
+        let mut combined = combine_meshes(child_meshes);
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut combined, r, g, b);
+        }
+        apply_mesh_transform_ir(&mut combined, &obj.transform);
+        Ok(combined)
+    } else if obj.obj_type == "instance" {
+        let component_name = obj
+            .component
+            .as_deref()
+            .ok_or_else(|| anyhow!("instance missing component reference"))?;
+        let component = components
+            .get(component_name)
+            .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
+        let mut mesh = build_mesh_recursive_from_ir(lua, component, circular_segments, components)?;
+        apply_mesh_transform_ir(&mut mesh, &obj.transform);
+        Ok(mesh)
+    } else if obj.obj_type == "csg" {
+        let manifold = build_manifold_object_from_ir(lua, obj, circular_segments, components)?;
+        let mut mesh = manifold_to_mesh_data(&manifold);
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut mesh, r, g, b);
+        } else if let Some(first_child) = obj.children.first() {
+            if let Some((r, g, b)) = get_material_color_ir(first_child) {
+                apply_color_to_mesh(&mut mesh, r, g, b);
+            }
+        }
+        Ok(mesh)
+    } else {
+        let manifold = build_manifold_primitive_from_ir(lua, obj, circular_segments)?;
+        let manifold = apply_manifold_transform_ir(manifold, &obj.transform);
+        let mut mesh = manifold_to_mesh_data(&manifold);
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut mesh, r, g, b);
+        }
+        Ok(mesh)
+    }
+}
+
+/// Generate mesh from canonical IR scene using existing Manifold primitive/boolean semantics.
 pub fn generate_mesh_from_ir_scene(
     lua: &Lua,
     scene: &ir::SceneIr,
     circular_segments: u32,
 ) -> Result<MeshData> {
-    let component_tables = ir_component_lua_tables(lua, scene)?;
+    let components = component_map_from_ir_scene(scene);
     let mut meshes = Vec::new();
 
     for obj in &scene.objects {
-        let table = ir::object_to_lua_table(lua, obj)?;
-        let mesh = build_mesh_recursive_with_components(
-            &table,
-            circular_segments,
-            &component_tables,
-        )?;
-        meshes.push(mesh);
+        meshes.push(build_mesh_recursive_from_ir(lua, obj, circular_segments, &components)?);
     }
 
     if meshes.is_empty() {
         return Err(anyhow!("No objects in scene"));
     }
-
     Ok(combine_meshes(meshes))
 }
 
@@ -943,13 +1192,8 @@ pub fn generate_mesh_from_ir_object(
     scene: Option<&ir::SceneIr>,
     circular_segments: u32,
 ) -> Result<MeshData> {
-    let components = if let Some(scene) = scene {
-        ir_component_lua_tables(lua, scene)?
-    } else {
-        HashMap::new()
-    };
-    let table = ir::object_to_lua_table(lua, obj)?;
-    build_mesh_recursive_with_components(&table, circular_segments, &components)
+    let components = scene.map(component_map_from_ir_scene).unwrap_or_default();
+    build_mesh_recursive_from_ir(lua, obj, circular_segments, &components)
 }
 
 /// Generate mesh from a single serialized object using Manifold
