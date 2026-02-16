@@ -212,6 +212,16 @@ manifold_runtime_lib_dir() {
   echo "$DEFAULT_RUNTIME_DIR/lib/manifold"
 }
 
+backend_ld_library_path() {
+  local lib_dir
+  lib_dir="$(manifold_runtime_lib_dir)"
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    echo "${lib_dir}:${LD_LIBRARY_PATH}"
+  else
+    echo "${lib_dir}"
+  fi
+}
+
 sync_manifold_runtime_libs_for_worktree() {
   local worktree="$1"
   local lib_dir
@@ -220,9 +230,17 @@ sync_manifold_runtime_libs_for_worktree() {
 
   local copied=0
   while IFS= read -r -d '' lib; do
-    cp -f "$lib" "$lib_dir/"
+    local target base major
+    target="$(basename "$lib")"
+    cp -f "$lib" "$lib_dir/$target"
+    if [[ "$target" =~ ^(.+\.so)\.([0-9]+)\.[0-9.]+$ ]]; then
+      base="${BASH_REMATCH[1]}"
+      major="${BASH_REMATCH[2]}"
+      ln -sfn "$target" "$lib_dir/$base.$major"
+      ln -sfn "$base.$major" "$lib_dir/$base"
+    fi
     copied=1
-  done < <(find "$worktree/server/target/release/build" -type f \( -name 'libmanifold*.so' -o -name 'libc++*.so*' -o -name 'libc++abi*.so*' \) -print0 2>/dev/null || true)
+  done < <(find "$worktree/server/target/release/build" -type f \( -name 'libmanifold*.so*' -o -name 'libc++*.so*' -o -name 'libc++abi*.so*' \) -print0 2>/dev/null || true)
 
   [[ "$copied" == "1" ]] || die "failed to locate manifold runtime .so files under $worktree/server/target/release/build"
 }
@@ -643,6 +661,9 @@ run_backend_foreground() {
   local ws_url="ws://127.0.0.1:${backend_port}/ws"
   local backend_bin="$worktree/server/target/release/mittens-server"
   [[ -x "$backend_bin" ]] || die "backend binary not found at $backend_bin (run backend install/start first)"
+  sync_manifold_runtime_libs_for_worktree "$worktree"
+  local backend_ld_path
+  backend_ld_path="$(backend_ld_library_path)"
   local registry_bin
   registry_bin="$(registry_bin_path)"
   [[ -x "$registry_bin" ]] || die "backend_registry binary not found at $registry_bin (run backend install/start first)"
@@ -661,7 +682,7 @@ run_backend_foreground() {
   trap 'registry_cmd_no_build "'"$registry_path"'" remove --backend-id "'"$backend_id"'" >/dev/null 2>&1 || true' EXIT INT TERM
 
   cd "$worktree"
-  MITTENS_PORT="$backend_port" "$backend_bin" "$project_file"
+  LD_LIBRARY_PATH="$backend_ld_path" MITTENS_PORT="$backend_port" "$backend_bin" "$project_file"
 }
 
 run_renderer_foreground() {
@@ -834,6 +855,7 @@ Restart=always
 RestartSec=1
 Environment=HOME=${HOME:-/tmp}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${HOME:-/tmp}/.cargo/bin
+Environment=LD_LIBRARY_PATH=$(backend_ld_library_path)
 
 [Install]
 WantedBy=default.target
@@ -911,6 +933,7 @@ systemd_backend_install() {
   mkdir -p "$DEFAULT_SYSTEMD_USER_DIR"
   ensure_registry_parent_dir "$registry_path"
   ensure_backend_bin_for_worktree "$worktree"
+  sync_manifold_runtime_libs_for_worktree "$worktree"
   ensure_registry_bin
 
   local unit_name
@@ -935,6 +958,7 @@ Restart=always
 RestartSec=1
 Environment=HOME=${HOME:-/tmp}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${HOME:-/tmp}/.cargo/bin
+Environment=LD_LIBRARY_PATH=$(backend_ld_library_path)
 
 [Install]
 WantedBy=default.target
