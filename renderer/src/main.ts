@@ -1241,8 +1241,9 @@ function update_labels(labels: Label[]) {
     text.anchorY = 'middle';
 
     if (label.ops && label.ops.length > 0) {
-      // Apply the same op sequence as geometry, with default text-facing orientation.
-      const transform = new THREE.Matrix4().makeRotationX(Math.PI / 2);
+      // Apply label ops in world space first.
+      // Then apply text-facing rotation locally so translation axes remain unchanged.
+      const transform = new THREE.Matrix4().identity();
 
       for (const op of label.ops) {
         if (op.op === 'translate') {
@@ -1273,6 +1274,7 @@ function update_labels(labels: Label[]) {
       transform.decompose(pos, quat, scl);
       text.position.copy(pos);
       text.quaternion.copy(quat);
+      text.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0, 'XYZ')));
       text.scale.copy(scl);
     } else {
       // Backward compatibility for labels produced without op lists.
