@@ -300,11 +300,8 @@ Mittens.register(transducer_circuit)
 -- ============================================================================
 
 view({
-  camera = "isometric",
-  distance = 150,
-  target = { 0, 0, PolyTube.height / 2 },
-  theme = "dark",
-  axes = { show = true, size = 20 },
+  flat_shading = true,
+  circular_segments = 64,
 })
 
 return Mittens.serialize()

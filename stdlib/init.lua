@@ -14,6 +14,7 @@ Mittens.physics = require("stdlib.physics")
 Mittens.view = require("stdlib.view")
 Mittens.export = require("stdlib.export")
 Mittens.circuits = require("stdlib.circuits")
+Mittens.threads = require("stdlib.threads")
 
 -- Export primitive functions to global scope
 box = Mittens.primitives.box
@@ -75,6 +76,9 @@ Amplifier = Mittens.circuits.Amplifier
 MatchingNetwork = Mittens.circuits.MatchingNetwork
 TransducerLoad = Mittens.circuits.TransducerLoad
 Circuit = Mittens.circuits.Circuit
+
+-- Export thread functions
+Threads = Mittens.threads
 
 
 -- Scene registry

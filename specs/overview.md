@@ -100,3 +100,4 @@ Transforms are NOT baked into SDF - they're serialized and applied by Rust backe
 - [export.md](stdlib/export.md) - File output
 - [view.md](stdlib/view.md) - Camera and rendering
 - [gotchas.md](stdlib/gotchas.md) - Known pitfalls
+- [internal_representation/README.md](internal_representation/README.md) - Geometry IR rollout specs and quick loop

@@ -1,10 +1,13 @@
 //! Manifold-based CSG geometry backend
 //! Uses manifold3d for guaranteed watertight manifold meshes
 
+use crate::ir;
+use crate::thread_primitives::{generate_external_thread, generate_internal_thread};
 use anyhow::{anyhow, Result};
 use manifold3d::types::{Matrix4x3, PositiveF64, PositiveI32, Vec3};
 use manifold3d::{Manifold, MeshGL};
 use mlua::{Lua, Value};
+use serde_json::Value as JsonValue;
 use std::alloc::{alloc, Layout};
 use std::collections::HashMap;
 use std::os::raw::c_void;
@@ -191,8 +194,16 @@ fn pos(v: f64) -> PositiveF64 {
     PositiveF64::new(v.abs().max(0.001)).unwrap()
 }
 
-fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segments: u32) -> Result<Manifold> {
-    tracing::debug!("build_manifold_primitive: obj_type='{}', circular_segments={}", obj_type, circular_segments);
+fn build_manifold_primitive(
+    obj_type: &str,
+    params: &mlua::Table,
+    circular_segments: u32,
+) -> Result<Manifold> {
+    tracing::debug!(
+        "build_manifold_primitive: obj_type='{}', circular_segments={}",
+        obj_type,
+        circular_segments
+    );
     match obj_type {
         "cylinder" => {
             let r: f64 = params.get("r")?;
@@ -245,7 +256,9 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
                     let nx = cos_v * cos_u;
                     let ny = cos_v * sin_u;
                     let nz = sin_v;
-                    vert_props.extend_from_slice(&[x as f32, y as f32, z as f32, nx as f32, ny as f32, nz as f32]);
+                    vert_props.extend_from_slice(&[
+                        x as f32, y as f32, z as f32, nx as f32, ny as f32, nz as f32,
+                    ]);
                 }
             }
 
@@ -306,9 +319,84 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
         "text" => {
             let text_str: String = params.get("text")?;
             let font_size: f64 = params.get("size")?;
-            
+
             // Generate text mesh
             generate_text_mesh(&text_str, font_size)
+        }
+        "external_thread" => {
+            // ISO metric external thread (male thread)
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize =
+                params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+
+            let (vert_props, tri_verts) = generate_external_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+            );
+
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            Ok(result)
+        }
+        "internal_thread" => {
+            // ISO metric internal thread (female thread)
+            let major_diameter: f64 = params.get("major_diameter")?;
+            let pitch: f64 = params.get("pitch").unwrap_or(3.0);
+            let height: f64 = params.get("height")?;
+            let segments_per_turn: usize =
+                params.get::<_, i64>("segments_per_turn").unwrap_or(32) as usize;
+            let clearance: f64 = params.get::<_, f64>("clearance").unwrap_or(0.0);
+
+            // Wall thickness for the tube
+            let thread_depth = 0.54125 * pitch;
+            let wall_thickness: f64 = params
+                .get::<_, f64>("wall_thickness")
+                .unwrap_or(thread_depth * 5.0);
+
+            let (vert_props, tri_verts) = generate_internal_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+                wall_thickness,
+            );
+
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            Ok(result)
         }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }
@@ -317,88 +405,83 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
 fn generate_text_mesh(text: &str, font_size: f64) -> Result<Manifold> {
     // Simple monospace font: each character is a 6x10 grid of unit squares
     // We'll create thin rectangles (extrusion in Y) for each character
-    
+
     let char_width = font_size * 0.6;
     let char_height = font_size;
     let extrusion_thickness = 0.5; // Slight 3D extrusion in Y direction
-    
+
     let mut vert_props: Vec<f32> = Vec::new();
     let mut tri_verts: Vec<u32> = Vec::new();
     let mut vertex_count = 0u32;
-    
+
     // Simple character rasterization: for each character, draw a filled rectangle
     for (char_idx, ch) in text.chars().enumerate() {
         let x_offset = (char_idx as f64) * char_width;
-        
+
         // Skip whitespace by rendering as empty space
         if ch == ' ' {
             continue;
         }
-        
+
         // Create a rectangle for the character
         // Vertices for front face (Y=0)
         let positions = vec![
-            (x_offset, 0.0, 0.0),                    // 0: front-bottom-left
-            (x_offset + char_width, 0.0, 0.0),       // 1: front-bottom-right
+            (x_offset, 0.0, 0.0),                      // 0: front-bottom-left
+            (x_offset + char_width, 0.0, 0.0),         // 1: front-bottom-right
             (x_offset + char_width, 0.0, char_height), // 2: front-top-right
-            (x_offset, 0.0, char_height),            // 3: front-top-left
+            (x_offset, 0.0, char_height),              // 3: front-top-left
             // Vertices for back face (Y=extrusion_thickness)
-            (x_offset, extrusion_thickness, 0.0),                    // 4: back-bottom-left
-            (x_offset + char_width, extrusion_thickness, 0.0),       // 5: back-bottom-right
+            (x_offset, extrusion_thickness, 0.0), // 4: back-bottom-left
+            (x_offset + char_width, extrusion_thickness, 0.0), // 5: back-bottom-right
             (x_offset + char_width, extrusion_thickness, char_height), // 6: back-top-right
-            (x_offset, extrusion_thickness, char_height),            // 7: back-top-left
+            (x_offset, extrusion_thickness, char_height), // 7: back-top-left
         ];
-        
+
         // Add vertices to the list (with dummy normals that will be computed later)
         for (px, py, pz) in positions {
             vert_props.extend_from_slice(&[px as f32, py as f32, pz as f32, 0.0, 0.0, 1.0]);
         }
-        
+
         // Add triangles for the 6 faces of the box
         let base = vertex_count;
-        
+
         // Front face (Y=0)
-        tri_verts.extend_from_slice(&[base, base+1, base+2]);
-        tri_verts.extend_from_slice(&[base, base+2, base+3]);
-        
+        tri_verts.extend_from_slice(&[base, base + 1, base + 2]);
+        tri_verts.extend_from_slice(&[base, base + 2, base + 3]);
+
         // Back face (Y=thickness)
-        tri_verts.extend_from_slice(&[base+4, base+6, base+5]);
-        tri_verts.extend_from_slice(&[base+4, base+7, base+6]);
-        
+        tri_verts.extend_from_slice(&[base + 4, base + 6, base + 5]);
+        tri_verts.extend_from_slice(&[base + 4, base + 7, base + 6]);
+
         // Top face (Z=height)
-        tri_verts.extend_from_slice(&[base+3, base+2, base+6]);
-        tri_verts.extend_from_slice(&[base+3, base+6, base+7]);
-        
+        tri_verts.extend_from_slice(&[base + 3, base + 2, base + 6]);
+        tri_verts.extend_from_slice(&[base + 3, base + 6, base + 7]);
+
         // Bottom face (Z=0)
-        tri_verts.extend_from_slice(&[base, base+5, base+1]);
-        tri_verts.extend_from_slice(&[base, base+4, base+5]);
-        
+        tri_verts.extend_from_slice(&[base, base + 5, base + 1]);
+        tri_verts.extend_from_slice(&[base, base + 4, base + 5]);
+
         // Left face (X=x_offset)
-        tri_verts.extend_from_slice(&[base, base+3, base+7]);
-        tri_verts.extend_from_slice(&[base, base+7, base+4]);
-        
+        tri_verts.extend_from_slice(&[base, base + 3, base + 7]);
+        tri_verts.extend_from_slice(&[base, base + 7, base + 4]);
+
         // Right face (X=x_offset+char_width)
-        tri_verts.extend_from_slice(&[base+1, base+5, base+6]);
-        tri_verts.extend_from_slice(&[base+1, base+6, base+2]);
-        
+        tri_verts.extend_from_slice(&[base + 1, base + 5, base + 6]);
+        tri_verts.extend_from_slice(&[base + 1, base + 6, base + 2]);
+
         vertex_count += 8;
     }
-    
+
     if vert_props.is_empty() {
         // Return empty/minimal geometry if no text (all spaces)
         // Create a tiny dummy box to avoid invalid manifold
-        let tiny = Manifold::new_cuboid(
-            pos(0.01),
-            pos(0.01),
-            pos(0.01),
-            false,
-        );
+        let tiny = Manifold::new_cuboid(pos(0.01), pos(0.01), pos(0.01), false);
         return Ok(tiny);
     }
-    
+
     let num_verts = vertex_count as usize;
     let num_tris = tri_verts.len() / 3;
-    
+
     // Create manifold from mesh
     let text_mesh: Manifold = unsafe {
         let mesh_ptr = manifold_meshgl(
@@ -412,7 +495,7 @@ fn generate_text_mesh(text: &str, font_size: f64) -> Result<Manifold> {
         let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
         std::mem::transmute(manifold_ptr)
     };
-    
+
     Ok(text_mesh)
 }
 
@@ -470,8 +553,470 @@ fn apply_manifold_ops(manifold: Manifold, table: &mlua::Table) -> Result<Manifol
     Ok(result)
 }
 
+fn json_number(params: &JsonValue, key: &str) -> Result<f64> {
+    params
+        .as_object()
+        .and_then(|o| o.get(key))
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| anyhow!("Missing numeric param '{}'", key))
+}
+
+fn json_number_or(params: &JsonValue, key: &str, default: f64) -> f64 {
+    params
+        .as_object()
+        .and_then(|o| o.get(key))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(default)
+}
+
+fn build_manifold_primitive_from_ir(
+    obj: &ir::ObjectIr,
+    circular_segments: u32,
+) -> Result<Manifold> {
+    let params = obj
+        .params
+        .as_ref()
+        .ok_or_else(|| anyhow!("Primitive '{}' missing params", obj.obj_type))?;
+
+    match obj.obj_type.as_str() {
+        "cylinder" => {
+            let r = json_number(params, "r")?;
+            let h = json_number(params, "h")?;
+            Ok(Manifold::new_cylinder(
+                pos(h),
+                pos(r),
+                None::<PositiveF64>,
+                Some(manifold3d::types::PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            ))
+        }
+        "box" => {
+            let w = json_number(params, "w")?;
+            let d = json_number_or(params, "d", w);
+            let h = json_number(params, "h")?;
+            Ok(Manifold::new_cuboid(pos(w), pos(d), pos(h), false))
+        }
+        "sphere" => {
+            let r = json_number(params, "r")?;
+            Ok(Manifold::new_sphere(
+                pos(r),
+                None::<manifold3d::types::PositiveI32>,
+            ))
+        }
+        "torus" => {
+            let major_radius = json_number(params, "major_radius")?;
+            let minor_radius = json_number(params, "minor_radius")?;
+            let u_segments = circular_segments as usize;
+            let v_segments = circular_segments as usize;
+            let pi2 = 2.0 * std::f64::consts::PI;
+
+            let num_verts = u_segments * v_segments;
+            let mut vert_props: Vec<f32> = Vec::with_capacity(num_verts * 6);
+
+            for i in 0..u_segments {
+                let u = pi2 * (i as f64) / (u_segments as f64);
+                let cos_u = u.cos();
+                let sin_u = u.sin();
+                for j in 0..v_segments {
+                    let v = pi2 * (j as f64) / (v_segments as f64);
+                    let cos_v = v.cos();
+                    let sin_v = v.sin();
+                    let x = (major_radius + minor_radius * cos_v) * cos_u;
+                    let y = (major_radius + minor_radius * cos_v) * sin_u;
+                    let z = minor_radius * sin_v;
+                    let nx = cos_v * cos_u;
+                    let ny = cos_v * sin_u;
+                    let nz = sin_v;
+                    vert_props.extend_from_slice(&[
+                        x as f32, y as f32, z as f32, nx as f32, ny as f32, nz as f32,
+                    ]);
+                }
+            }
+
+            let num_tris = u_segments * v_segments * 2;
+            let mut tri_verts: Vec<u32> = Vec::with_capacity(num_tris * 3);
+            for i in 0..u_segments {
+                let i_next = (i + 1) % u_segments;
+                for j in 0..v_segments {
+                    let j_next = (j + 1) % v_segments;
+                    let v00 = (i * v_segments + j) as u32;
+                    let v10 = (i_next * v_segments + j) as u32;
+                    let v01 = (i * v_segments + j_next) as u32;
+                    let v11 = (i_next * v_segments + j_next) as u32;
+                    tri_verts.extend_from_slice(&[v00, v10, v11]);
+                    tri_verts.extend_from_slice(&[v00, v11, v01]);
+                }
+            }
+
+            let torus: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    num_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            Ok(torus)
+        }
+        "ring" => {
+            let inner_radius = json_number(params, "inner_radius")?;
+            let outer_radius = json_number(params, "outer_radius")?;
+            let h = json_number(params, "h")?;
+
+            let outer = Manifold::new_cylinder(
+                pos(h),
+                pos(outer_radius),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            );
+            let inner = Manifold::new_cylinder(
+                pos(h + 0.01),
+                pos(inner_radius),
+                None::<PositiveF64>,
+                Some(PositiveI32::new(circular_segments as i32).unwrap()),
+                false,
+            );
+            Ok(outer.difference(&inner))
+        }
+        "text" => {
+            let text = params
+                .as_object()
+                .and_then(|o| o.get("text"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("text primitive missing params.text"))?;
+            let size = json_number(params, "size")?;
+            generate_text_mesh(text, size)
+        }
+        "external_thread" => {
+            let major_diameter = json_number(params, "major_diameter")?;
+            let pitch = json_number_or(params, "pitch", 3.0);
+            let height = json_number(params, "height")?;
+            let segments_per_turn = params
+                .as_object()
+                .and_then(|o| o.get("segments_per_turn"))
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|n| n as i64)))
+                .unwrap_or(32) as usize;
+            let clearance = json_number_or(params, "clearance", 0.0);
+
+            let (vert_props, tri_verts) = generate_external_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+            );
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            Ok(result)
+        }
+        "internal_thread" => {
+            let major_diameter = json_number(params, "major_diameter")?;
+            let pitch = json_number_or(params, "pitch", 3.0);
+            let height = json_number(params, "height")?;
+            let segments_per_turn = params
+                .as_object()
+                .and_then(|o| o.get("segments_per_turn"))
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|n| n as i64)))
+                .unwrap_or(32) as usize;
+            let clearance = json_number_or(params, "clearance", 0.0);
+            let thread_depth = 0.54125 * pitch;
+            let wall_thickness = json_number_or(params, "wall_thickness", thread_depth * 5.0);
+
+            let (vert_props, tri_verts) = generate_internal_thread(
+                major_diameter,
+                pitch,
+                height,
+                segments_per_turn,
+                clearance,
+                wall_thickness,
+            );
+            let actual_verts = vert_props.len() / 6;
+            let num_tris = tri_verts.len() / 3;
+            let result: Manifold = unsafe {
+                let mesh_ptr = manifold_meshgl(
+                    manifold_alloc_meshgl(),
+                    vert_props.as_ptr(),
+                    actual_verts,
+                    6,
+                    tri_verts.as_ptr(),
+                    num_tris,
+                );
+                let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+                std::mem::transmute(manifold_ptr)
+            };
+            Ok(result)
+        }
+        _ => Err(anyhow!("Unknown primitive type: {}", obj.obj_type)),
+    }
+}
+
+fn manifold_transform_from_ir(transform: &ir::TransformIr) -> Matrix4x3 {
+    let m = transform.matrix;
+    Matrix4x3::new([
+        Vec3::new(m[0][0], m[0][1], m[0][2]),
+        Vec3::new(m[1][0], m[1][1], m[1][2]),
+        Vec3::new(m[2][0], m[2][1], m[2][2]),
+        Vec3::new(m[0][3], m[1][3], m[2][3]),
+    ])
+}
+
+fn apply_manifold_transform_ir(manifold: Manifold, transform: &ir::TransformIr) -> Manifold {
+    manifold.transform(manifold_transform_from_ir(transform))
+}
+
+fn component_map_from_ir_scene(scene: &ir::SceneIr) -> HashMap<String, ir::ObjectIr> {
+    fn collect(node: &ir::ObjectIr, out: &mut HashMap<String, ir::ObjectIr>) {
+        if node.obj_type == "component" {
+            if let Some(name) = &node.name {
+                out.insert(name.clone(), node.clone());
+            }
+        }
+        for child in &node.children {
+            collect(child, out);
+        }
+    }
+
+    let mut out = HashMap::new();
+    for obj in &scene.objects {
+        collect(obj, &mut out);
+    }
+    out
+}
+
+fn build_manifold_object_from_ir(
+    obj: &ir::ObjectIr,
+    circular_segments: u32,
+    components: &HashMap<String, ir::ObjectIr>,
+) -> Result<Manifold> {
+    let manifold = if obj.obj_type == "csg" {
+        let operation = obj
+            .operation
+            .as_deref()
+            .ok_or_else(|| anyhow!("CSG object missing operation"))?;
+        let first = obj
+            .children
+            .first()
+            .ok_or_else(|| anyhow!("CSG object missing children"))?;
+        let mut result = build_manifold_object_from_ir(first, circular_segments, components)?;
+        for child in obj.children.iter().skip(1) {
+            let child_m = build_manifold_object_from_ir(child, circular_segments, components)?;
+            result = match operation {
+                "union" => result.union(&child_m),
+                "difference" => result.difference(&child_m),
+                "intersect" => result.intersection(&child_m),
+                _ => return Err(anyhow!("Unknown CSG operation: {}", operation)),
+            };
+        }
+        result
+    } else if obj.obj_type == "group" || obj.obj_type == "assembly" || obj.obj_type == "component" {
+        let mut result: Option<Manifold> = None;
+        for child in &obj.children {
+            let child_m = build_manifold_object_from_ir(child, circular_segments, components)?;
+            result = Some(match result {
+                Some(r) => r.union(&child_m),
+                None => child_m,
+            });
+        }
+        result.ok_or_else(|| anyhow!("Empty {}", obj.obj_type))?
+    } else if obj.obj_type == "instance" {
+        let component_name = obj
+            .component
+            .as_deref()
+            .ok_or_else(|| anyhow!("instance missing component reference"))?;
+        let component = components
+            .get(component_name)
+            .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
+        build_manifold_object_from_ir(component, circular_segments, components)?
+    } else {
+        build_manifold_primitive_from_ir(obj, circular_segments)?
+    };
+
+    Ok(apply_manifold_transform_ir(manifold, &obj.transform))
+}
+
+fn parse_rgb_array(value: &JsonValue) -> Option<(f32, f32, f32)> {
+    let arr = value.as_array()?;
+    if arr.len() < 3 {
+        return None;
+    }
+    let r = arr[0].as_f64()? as f32;
+    let g = arr[1].as_f64()? as f32;
+    let b = arr[2].as_f64()? as f32;
+    Some((r, g, b))
+}
+
+fn get_material_color_ir(obj: &ir::ObjectIr) -> Option<(f32, f32, f32)> {
+    if let Some(color) = &obj.color {
+        if let Some(rgb) = parse_rgb_array(color) {
+            return Some(rgb);
+        }
+    }
+    if let Some(material) = &obj.material {
+        if let Some(color) = material.as_object().and_then(|m| m.get("color")) {
+            if let Some(rgb) = parse_rgb_array(color) {
+                return Some(rgb);
+            }
+        }
+    }
+    None
+}
+
+fn inverse_3x3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    Some([
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
+        ],
+    ])
+}
+
+fn apply_mesh_transform_ir(mesh: &mut MeshData, transform: &ir::TransformIr) {
+    let m = transform.matrix;
+    let lin = [
+        [m[0][0], m[0][1], m[0][2]],
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]],
+    ];
+    let normal_matrix = inverse_3x3(lin).map(|inv| {
+        [
+            [inv[0][0], inv[1][0], inv[2][0]],
+            [inv[0][1], inv[1][1], inv[2][1]],
+            [inv[0][2], inv[1][2], inv[2][2]],
+        ]
+    });
+
+    for i in 0..mesh.positions.len() / 3 {
+        let px = mesh.positions[i * 3] as f64;
+        let py = mesh.positions[i * 3 + 1] as f64;
+        let pz = mesh.positions[i * 3 + 2] as f64;
+        mesh.positions[i * 3] = (m[0][0] * px + m[0][1] * py + m[0][2] * pz + m[0][3]) as f32;
+        mesh.positions[i * 3 + 1] = (m[1][0] * px + m[1][1] * py + m[1][2] * pz + m[1][3]) as f32;
+        mesh.positions[i * 3 + 2] = (m[2][0] * px + m[2][1] * py + m[2][2] * pz + m[2][3]) as f32;
+    }
+
+    for i in 0..mesh.normals.len() / 3 {
+        let nx = mesh.normals[i * 3] as f64;
+        let ny = mesh.normals[i * 3 + 1] as f64;
+        let nz = mesh.normals[i * 3 + 2] as f64;
+        let (tx, ty, tz) = if let Some(nm) = normal_matrix {
+            (
+                nm[0][0] * nx + nm[0][1] * ny + nm[0][2] * nz,
+                nm[1][0] * nx + nm[1][1] * ny + nm[1][2] * nz,
+                nm[2][0] * nx + nm[2][1] * ny + nm[2][2] * nz,
+            )
+        } else {
+            (
+                lin[0][0] * nx + lin[0][1] * ny + lin[0][2] * nz,
+                lin[1][0] * nx + lin[1][1] * ny + lin[1][2] * nz,
+                lin[2][0] * nx + lin[2][1] * ny + lin[2][2] * nz,
+            )
+        };
+        let len = (tx * tx + ty * ty + tz * tz).sqrt();
+        if len > 1e-12 {
+            mesh.normals[i * 3] = (tx / len) as f32;
+            mesh.normals[i * 3 + 1] = (ty / len) as f32;
+            mesh.normals[i * 3 + 2] = (tz / len) as f32;
+        }
+    }
+}
+
+fn build_mesh_recursive_from_ir(
+    obj: &ir::ObjectIr,
+    circular_segments: u32,
+    components: &HashMap<String, ir::ObjectIr>,
+) -> Result<MeshData> {
+    if obj.obj_type == "group" || obj.obj_type == "assembly" || obj.obj_type == "component" {
+        let mut child_meshes = Vec::new();
+        for child in &obj.children {
+            child_meshes.push(build_mesh_recursive_from_ir(
+                child,
+                circular_segments,
+                components,
+            )?);
+        }
+        if child_meshes.is_empty() {
+            return Err(anyhow!("Empty {}", obj.obj_type));
+        }
+        let mut combined = combine_meshes(child_meshes);
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut combined, r, g, b);
+        }
+        apply_mesh_transform_ir(&mut combined, &obj.transform);
+        Ok(combined)
+    } else if obj.obj_type == "instance" {
+        let component_name = obj
+            .component
+            .as_deref()
+            .ok_or_else(|| anyhow!("instance missing component reference"))?;
+        let component = components
+            .get(component_name)
+            .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
+        let mut mesh = build_mesh_recursive_from_ir(component, circular_segments, components)?;
+        apply_mesh_transform_ir(&mut mesh, &obj.transform);
+        Ok(mesh)
+    } else if obj.obj_type == "csg" {
+        let manifold = build_manifold_object_from_ir(obj, circular_segments, components)?;
+        let mut mesh = manifold_to_mesh_data(&manifold);
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut mesh, r, g, b);
+        } else if let Some(first_child) = obj.children.first() {
+            if let Some((r, g, b)) = get_material_color_ir(first_child) {
+                apply_color_to_mesh(&mut mesh, r, g, b);
+            }
+        }
+        Ok(mesh)
+    } else {
+        let manifold = build_manifold_primitive_from_ir(obj, circular_segments)?;
+        let manifold = apply_manifold_transform_ir(manifold, &obj.transform);
+        let mut mesh = manifold_to_mesh_data(&manifold);
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut mesh, r, g, b);
+        }
+        Ok(mesh)
+    }
+}
+
 fn build_manifold_object(table: &mlua::Table, circular_segments: u32) -> Result<Manifold> {
-    build_manifold_object_with_components(table, circular_segments, &std::collections::HashMap::new())
+    build_manifold_object_with_components(
+        table,
+        circular_segments,
+        &std::collections::HashMap::new(),
+    )
 }
 
 fn build_manifold_object_with_components(
@@ -488,11 +1033,13 @@ fn build_manifold_object_with_components(
         let children: mlua::Table = table.get("children")?;
 
         let first_child: mlua::Table = children.get(1)?;
-        let mut result = build_manifold_object_with_components(&first_child, circular_segments, components)?;
+        let mut result =
+            build_manifold_object_with_components(&first_child, circular_segments, components)?;
 
         for i in 2..=children.len()? {
             let child: mlua::Table = children.get(i)?;
-            let child_manifold = build_manifold_object_with_components(&child, circular_segments, components)?;
+            let child_manifold =
+                build_manifold_object_with_components(&child, circular_segments, components)?;
             result = match operation.as_str() {
                 "union" => result.union(&child_manifold),
                 "difference" => result.difference(&child_manifold),
@@ -509,7 +1056,8 @@ fn build_manifold_object_with_components(
 
         for pair in children.pairs::<i64, mlua::Table>() {
             let (_, child) = pair?;
-            let child_manifold = build_manifold_object_with_components(&child, circular_segments, components)?;
+            let child_manifold =
+                build_manifold_object_with_components(&child, circular_segments, components)?;
             result = Some(match result {
                 Some(r) => r.union(&child_manifold),
                 None => child_manifold,
@@ -525,7 +1073,8 @@ fn build_manifold_object_with_components(
 
         for pair in children.pairs::<i64, mlua::Table>() {
             let (_, child) = pair?;
-            let child_manifold = build_manifold_object_with_components(&child, circular_segments, components)?;
+            let child_manifold =
+                build_manifold_object_with_components(&child, circular_segments, components)?;
             result = Some(match result {
                 Some(r) => r.union(&child_manifold),
                 None => child_manifold,
@@ -537,11 +1086,13 @@ fn build_manifold_object_with_components(
     } else if obj_type == "instance" {
         // Instances reference a component by name and apply transforms
         let component_name: String = table.get("component")?;
-        let component = components.get(&component_name)
+        let component = components
+            .get(&component_name)
             .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
 
         // Build the component's geometry
-        let manifold = build_manifold_object_with_components(component, circular_segments, components)?;
+        let manifold =
+            build_manifold_object_with_components(component, circular_segments, components)?;
         // Apply the instance's transforms
         apply_manifold_ops(manifold, table)
     } else {
@@ -592,7 +1143,9 @@ fn combine_meshes(meshes: Vec<MeshData>) -> MeshData {
         combined.positions.extend(&mesh.positions);
         combined.normals.extend(&mesh.normals);
         combined.colors.extend(&mesh.colors);
-        combined.indices.extend(mesh.indices.iter().map(|i| i + vertex_offset));
+        combined
+            .indices
+            .extend(mesh.indices.iter().map(|i| i + vertex_offset));
     }
 
     combined
@@ -609,7 +1162,10 @@ fn build_mesh_recursive_with_components(
     components: &HashMap<String, mlua::Table>,
 ) -> Result<MeshData> {
     let obj_type: String = table.get("type")?;
-    tracing::debug!("build_mesh_recursive_with_components: obj_type='{}'", obj_type);
+    tracing::debug!(
+        "build_mesh_recursive_with_components: obj_type='{}'",
+        obj_type
+    );
 
     if obj_type == "group" || obj_type == "assembly" || obj_type == "component" {
         // Groups, assemblies, and components all union their children
@@ -618,7 +1174,8 @@ fn build_mesh_recursive_with_components(
 
         for pair in children.pairs::<i64, mlua::Table>() {
             let (_, child) = pair?;
-            let child_mesh = build_mesh_recursive_with_components(&child, circular_segments, components)?;
+            let child_mesh =
+                build_mesh_recursive_with_components(&child, circular_segments, components)?;
             child_meshes.push(child_mesh);
         }
 
@@ -642,11 +1199,13 @@ fn build_mesh_recursive_with_components(
     } else if obj_type == "instance" {
         // Instances reference a component by name and apply transforms
         let component_name: String = table.get("component")?;
-        let component = components.get(&component_name)
+        let component = components
+            .get(&component_name)
             .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
 
         // Build the component's geometry
-        let mut mesh = build_mesh_recursive_with_components(component, circular_segments, components)?;
+        let mut mesh =
+            build_mesh_recursive_with_components(component, circular_segments, components)?;
 
         // Apply the instance's transforms
         if let Ok(ops) = table.get::<_, mlua::Table>("ops") {
@@ -781,7 +1340,11 @@ pub fn build_object_manifold(table: &mlua::Table, circular_segments: u32) -> Res
 }
 
 /// Build mesh from a serialized object using Manifold, with optional degenerate triangle removal
-pub fn build_object_manifold_clean(table: &mlua::Table, circular_segments: u32, remove_degenerates: bool) -> Result<MeshData> {
+pub fn build_object_manifold_clean(
+    table: &mlua::Table,
+    circular_segments: u32,
+    remove_degenerates: bool,
+) -> Result<MeshData> {
     let mut mesh = build_mesh_recursive(table, circular_segments)?;
     if remove_degenerates {
         let removed = remove_degenerate_triangles(&mut mesh);
@@ -793,12 +1356,21 @@ pub fn build_object_manifold_clean(table: &mlua::Table, circular_segments: u32, 
 }
 
 /// Generate mesh from Lua scene using Manifold backend
-pub fn generate_mesh_from_lua_manifold(_lua: &Lua, value: &Value, circular_segments: u32) -> Result<MeshData> {
+pub fn generate_mesh_from_lua_manifold(
+    _lua: &Lua,
+    value: &Value,
+    circular_segments: u32,
+) -> Result<MeshData> {
     generate_mesh_from_lua_manifold_clean(_lua, value, circular_segments, false)
 }
 
 /// Generate mesh from Lua scene using Manifold backend, with optional degenerate triangle removal
-pub fn generate_mesh_from_lua_manifold_clean(_lua: &Lua, value: &Value, circular_segments: u32, remove_degenerates: bool) -> Result<MeshData> {
+pub fn generate_mesh_from_lua_manifold_clean(
+    _lua: &Lua,
+    value: &Value,
+    circular_segments: u32,
+    remove_degenerates: bool,
+) -> Result<MeshData> {
     let table = value.as_table().ok_or_else(|| anyhow!("Expected table"))?;
     let objects: mlua::Table = table.get("objects")?;
 
@@ -824,13 +1396,58 @@ pub fn generate_mesh_from_lua_manifold_clean(_lua: &Lua, value: &Value, circular
     Ok(combined)
 }
 
+/// Generate mesh from canonical IR scene using Manifold backend
+pub fn generate_mesh_from_ir_scene(
+    scene: &ir::SceneIr,
+    circular_segments: u32,
+) -> Result<MeshData> {
+    generate_mesh_from_ir_scene_clean(scene, circular_segments, false)
+}
+
+/// Generate mesh from canonical IR scene using Manifold backend, with optional degenerate triangle removal
+pub fn generate_mesh_from_ir_scene_clean(
+    scene: &ir::SceneIr,
+    circular_segments: u32,
+    remove_degenerates: bool,
+) -> Result<MeshData> {
+    let components = component_map_from_ir_scene(scene);
+    let mut meshes = Vec::new();
+
+    for obj in &scene.objects {
+        let mesh = build_mesh_recursive_from_ir(obj, circular_segments, &components)?;
+        meshes.push(mesh);
+    }
+
+    if meshes.is_empty() {
+        return Err(anyhow!("No objects in scene"));
+    }
+
+    let mut combined = combine_meshes(meshes);
+    if remove_degenerates {
+        let removed = remove_degenerate_triangles(&mut combined);
+        if removed > 0 {
+            tracing::debug!("Removed {} degenerate triangles from IR scene", removed);
+        }
+    }
+    Ok(combined)
+}
+
 /// Generate mesh from a single serialized object using Manifold
-pub fn generate_mesh_from_object_manifold(_lua: &Lua, table: &mlua::Table, circular_segments: u32) -> Result<MeshData> {
+pub fn generate_mesh_from_object_manifold(
+    _lua: &Lua,
+    table: &mlua::Table,
+    circular_segments: u32,
+) -> Result<MeshData> {
     build_object_manifold(table, circular_segments)
 }
 
 /// Generate mesh from a single serialized object using Manifold, with optional degenerate triangle removal
-pub fn generate_mesh_from_object_manifold_clean(_lua: &Lua, table: &mlua::Table, circular_segments: u32, remove_degenerates: bool) -> Result<MeshData> {
+pub fn generate_mesh_from_object_manifold_clean(
+    _lua: &Lua,
+    table: &mlua::Table,
+    circular_segments: u32,
+    remove_degenerates: bool,
+) -> Result<MeshData> {
     build_object_manifold_clean(table, circular_segments, remove_degenerates)
 }
 
@@ -922,7 +1539,10 @@ pub fn validate_mesh(mesh: &MeshData) -> MeshValidation {
     let num_vertices = mesh.positions.len() / 3;
     for (i, &idx) in mesh.indices.iter().enumerate() {
         if idx as usize >= num_vertices {
-            warnings.push(format!("Index {} references out-of-bounds vertex {}", i, idx));
+            warnings.push(format!(
+                "Index {} references out-of-bounds vertex {}",
+                i, idx
+            ));
             valid = false;
         }
     }
@@ -970,7 +1590,10 @@ pub fn validate_mesh(mesh: &MeshData) -> MeshValidation {
     }
 
     if degenerate_count > 0 {
-        warnings.push(format!("{} degenerate triangles (zero area)", degenerate_count));
+        warnings.push(format!(
+            "{} degenerate triangles (zero area)",
+            degenerate_count
+        ));
     }
 
     // Check mesh bounds (warn if very small or very large)
@@ -1029,7 +1652,11 @@ mod tests {
         };
         let result = validate_mesh(&mesh);
         assert!(result.valid, "Valid mesh should pass validation");
-        assert!(result.warnings.is_empty(), "Valid mesh should have no warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "Valid mesh should have no warnings: {:?}",
+            result.warnings
+        );
     }
 
     #[test]
@@ -1075,29 +1702,17 @@ mod tests {
         let mut mesh = MeshData {
             positions: vec![
                 // Valid triangle vertices (0, 1, 2)
-                0.0, 0.0, 0.0,
-                10.0, 0.0, 0.0,
-                5.0, 10.0, 10.0,
+                0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 5.0, 10.0, 10.0,
                 // Degenerate triangle 1: all same point (3, 4, 5)
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
             ],
             normals: vec![
-                0.0, 0.0, 1.0,
-                0.0, 0.0, 1.0,
-                0.0, 0.0, 1.0,
-                0.0, 0.0, 1.0,
-                0.0, 0.0, 1.0,
-                0.0, 0.0, 1.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+                0.0, 1.0,
             ],
             colors: vec![
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                1.0, 1.0,
             ],
             // Triangle 1: valid (0,1,2), Triangle 2: degenerate (3,4,5), Triangle 3: collinear (0,0,1)
             indices: vec![0, 1, 2, 3, 4, 5, 0, 0, 1],
@@ -1109,18 +1724,18 @@ mod tests {
         let removed = remove_degenerate_triangles(&mut mesh);
 
         assert_eq!(removed, 2, "Should remove 2 degenerate triangles");
-        assert_eq!(mesh.indices.len(), 3, "Should have 3 indices left (1 triangle)");
+        assert_eq!(
+            mesh.indices.len(),
+            3,
+            "Should have 3 indices left (1 triangle)"
+        );
         assert_eq!(mesh.indices, vec![0, 1, 2], "Valid triangle should remain");
     }
 
     #[test]
     fn test_remove_degenerate_triangles_all_valid() {
         let mut mesh = MeshData {
-            positions: vec![
-                0.0, 0.0, 0.0,
-                10.0, 0.0, 0.0,
-                5.0, 10.0, 10.0,
-            ],
+            positions: vec![0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 5.0, 10.0, 10.0],
             normals: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
             colors: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             indices: vec![0, 1, 2],

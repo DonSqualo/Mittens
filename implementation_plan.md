@@ -43,6 +43,33 @@ Files: `server/src/circuit.rs`
 
 # ===
 
+## Recently Fixed (2026-02-08)
+
+### Internal Representation Quick Loop (Pure Acoustics)
+Added a first geometry-only subagent loop to produce canonical IR artifacts and mesh validation in one command.
+- New binary: `server/src/bin/ir_subagent.rs`
+- Outputs: `canonical_ir.json` and `summary.json` to `server/target/ir_subagent/`
+- Validates current manifold mesh output and reports deterministic scene hash
+
+### Tolerance Oracle + Cross-Backend Conformance Scaffold
+Added a geometry conformance oracle that compares baseline IR-manifold mesh to candidate STL artifacts from another backend.
+- New module: `server/src/conformance.rs`
+- Metrics: sampled symmetric surface distance (Hausdorff-style), inside/outside disagreement, boundary-band disagreement, sampled volume delta, bounds deltas
+- `ir_subagent` now supports:
+  - `--candidate-stl <path>` for cross-backend checks
+  - `--emit-baseline-stl` for baseline artifact generation
+  - threshold/sample flags for oracle tuning
+- Outputs `conformance.json` when candidate is provided
+
+### Pure Acoustics Example View Compatibility
+Updated in-repo pure acoustics example view config to match current `stdlib/view.lua` camera schema.
+- Replaced unsupported `camera = "isometric"` usage with current flat-shading/circular-segment configuration
+- File: `examples/multiphysics/pure_acoustics.lua`
+
+Files: `server/src/bin/ir_subagent.rs`, `examples/multiphysics/pure_acoustics.lua`
+
+# ===
+
 ## Recently Fixed (2026-01-22)
 
 ### NanoVNA Coupled Resonator

@@ -2,6 +2,16 @@
 
 Build and development notes for Claude agents.
 
+## CRITICAL SERVE RULE (NON-NEGOTIABLE)
+
+When the user says `SERVE X`, it always means:
+
+1. Use the `mittens` CLI.
+2. Resolve `X` to a Lua project file under `~/projects` (never from repo `examples/` unless the user explicitly asks for examples).
+3. Serve that `~/projects` file via `mittens` using `--projects-root "$HOME/projects"` and the resolved `--project-file`.
+
+Do not reinterpret `SERVE X` as anything else.
+
 ## Build Commands
 
 ### Server (Rust)
@@ -10,6 +20,8 @@ cd server
 cargo test        # Run tests (60 tests across all modules)
 cargo build       # Debug build
 cargo build --release  # Release build
+cargo run --release --bin ir_subagent -- --file ../examples/multiphysics/pure_acoustics.lua  # Canonical IR + mesh validation loop
+cargo run --release --bin ir_subagent -- --file ../examples/multiphysics/pure_acoustics.lua --emit-baseline-stl --candidate-stl target/ir_subagent/baseline_manifold.stl  # Tolerance oracle + conformance self-check
 ```
 
 ### Renderer (TypeScript)

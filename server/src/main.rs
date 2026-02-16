@@ -26,7 +26,9 @@ mod circuit;
 mod export;
 mod field;
 mod geometry;
+mod ir;
 mod nanovna;
+mod thread_primitives;
 
 struct AppState {
     mesh_tx: broadcast::Sender<Vec<u8>>,
@@ -45,7 +47,9 @@ struct AppState {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let file_path = std::env::args().nth(1).unwrap_or("../examples/tube.lua".into());
+    let file_path = std::env::args()
+        .nth(1)
+        .unwrap_or("../examples/tube.lua".into());
     let file_path = PathBuf::from(file_path);
 
     info!("Watching: {:?}", file_path);
@@ -183,11 +187,16 @@ fn serialize_view_config(flat_shading: bool, camera: Option<CameraState>) -> Vec
     data
 }
 
-fn process_lua_files(mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>, tx: mpsc::UnboundedSender<Vec<u8>>, labels_tx: mpsc::UnboundedSender<String>) {
+fn process_lua_files(
+    mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    labels_tx: mpsc::UnboundedSender<String>,
+) {
     let lua = mlua::Lua::new();
 
     // Set up package path to include stdlib directory
-    let package_path = lua.globals()
+    let package_path = lua
+        .globals()
         .get::<_, mlua::Table>("package")
         .and_then(|p| p.get::<_, String>("path"))
         .unwrap_or_default();
@@ -324,7 +333,10 @@ fn parse_plane_type(plane_str: &str) -> field::PlaneType {
     }
 }
 
-fn get_field_plane_config(lua: &mlua::Lua, instrument_type: &str) -> (field::PlaneType, f64, field::Colormap) {
+fn get_field_plane_config(
+    lua: &mlua::Lua,
+    instrument_type: &str,
+) -> (field::PlaneType, f64, field::Colormap) {
     let globals = lua.globals();
 
     let instruments: mlua::Table = match globals.get("Instruments") {
@@ -356,9 +368,15 @@ fn get_field_plane_config(lua: &mlua::Lua, instrument_type: &str) -> (field::Pla
 
             let plane_str: String = config.get("plane").unwrap_or_else(|_| "XZ".to_string());
             let offset: f64 = config.get("offset").unwrap_or(0.0);
-            let colormap_str: String = config.get("color_map").unwrap_or_else(|_| "jet".to_string());
+            let colormap_str: String = config
+                .get("color_map")
+                .unwrap_or_else(|_| "jet".to_string());
 
-            return (parse_plane_type(&plane_str), offset, field::Colormap::from_str(&colormap_str));
+            return (
+                parse_plane_type(&plane_str),
+                offset,
+                field::Colormap::from_str(&colormap_str),
+            );
         }
     }
 
@@ -366,7 +384,10 @@ fn get_field_plane_config(lua: &mlua::Lua, instrument_type: &str) -> (field::Pla
 }
 
 fn try_compute_helmholtz_field(lua: &mlua::Lua, content: &str) -> Option<field::FieldData> {
-    if !content.contains("helmholtz") && !content.contains("Coil") && !content.contains("coil_mean_radius") {
+    if !content.contains("helmholtz")
+        && !content.contains("Coil")
+        && !content.contains("coil_mean_radius")
+    {
         return None;
     }
 
@@ -376,23 +397,24 @@ fn try_compute_helmholtz_field(lua: &mlua::Lua, content: &str) -> Option<field::
     let globals = lua.globals();
 
     // Try "Coil" global first (project convention), then fall back to "config"
-    let (coil_mean_radius, gap, windings, layers, current) = if let Ok(coil) = globals.get::<_, mlua::Table>("Coil") {
-        let mean_radius: f64 = coil.get("mean_radius").ok()?;
-        let gap: f64 = coil.get("gap").ok()?;
-        let windings: f64 = coil.get("windings").unwrap_or(100.0);
-        let layers: f64 = coil.get("layers").unwrap_or(10.0);
-        let current: f64 = coil.get("current").unwrap_or(1.0);
-        (mean_radius, gap, windings, layers, current)
-    } else if let Ok(config) = globals.get::<_, mlua::Table>("config") {
-        let mean_radius: f64 = config.get("coil_mean_radius").ok()?;
-        let gap: f64 = config.get("gap").ok()?;
-        let windings: f64 = config.get("windings").unwrap_or(100.0);
-        let layers: f64 = config.get("layers").unwrap_or(10.0);
-        let current: f64 = config.get("current").unwrap_or(1.0);
-        (mean_radius, gap, windings, layers, current)
-    } else {
-        return None;
-    };
+    let (coil_mean_radius, gap, windings, layers, current) =
+        if let Ok(coil) = globals.get::<_, mlua::Table>("Coil") {
+            let mean_radius: f64 = coil.get("mean_radius").ok()?;
+            let gap: f64 = coil.get("gap").ok()?;
+            let windings: f64 = coil.get("windings").unwrap_or(100.0);
+            let layers: f64 = coil.get("layers").unwrap_or(10.0);
+            let current: f64 = coil.get("current").unwrap_or(1.0);
+            (mean_radius, gap, windings, layers, current)
+        } else if let Ok(config) = globals.get::<_, mlua::Table>("config") {
+            let mean_radius: f64 = config.get("coil_mean_radius").ok()?;
+            let gap: f64 = config.get("gap").ok()?;
+            let windings: f64 = config.get("windings").unwrap_or(100.0);
+            let layers: f64 = config.get("layers").unwrap_or(10.0);
+            let current: f64 = config.get("current").unwrap_or(1.0);
+            (mean_radius, gap, windings, layers, current)
+        } else {
+            return None;
+        };
 
     // Try to get Wire config for packing info
     let (wire_diameter, packing_factor) = if let Ok(wire) = globals.get::<_, mlua::Table>("Wire") {
@@ -481,48 +503,58 @@ fn try_compute_acoustic_field(lua: &mlua::Lua, content: &str) -> Option<field::F
         drive_amplitude,
     };
 
-    let (plane_type, plane_offset, colormap) = get_field_plane_config(lua, "acoustic_pressure_plane");
+    let (plane_type, plane_offset, colormap) =
+        get_field_plane_config(lua, "acoustic_pressure_plane");
 
     info!(
         "Computing acoustic field: f={:.0}Hz, R={:.1}mm, z={:.1}mm, plane={:?}, offset={:.1}mm, colormap={:?}",
         config.frequency, config.transducer_radius, config.transducer_z, plane_type, plane_offset, colormap
     );
 
-    Some(acoustic::compute_acoustic_field(&config, plane_type, plane_offset, colormap))
+    Some(acoustic::compute_acoustic_field(
+        &config,
+        plane_type,
+        plane_offset,
+        colormap,
+    ))
 }
 
 fn try_compute_probe_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::LineMeasurement> {
     let mut measurements = Vec::new();
 
-    if !content.contains("helmholtz") && !content.contains("Coil") && !content.contains("coil_mean_radius") {
+    if !content.contains("helmholtz")
+        && !content.contains("Coil")
+        && !content.contains("coil_mean_radius")
+    {
         return measurements;
     }
 
     let globals = lua.globals();
 
-    let (coil_mean_radius, gap, windings, layers, current) = if let Ok(coil) = globals.get::<_, mlua::Table>("Coil") {
-        let mean_radius: f64 = match coil.get("mean_radius") {
-            Ok(v) => v,
-            Err(_) => return measurements,
+    let (coil_mean_radius, gap, windings, layers, current) =
+        if let Ok(coil) = globals.get::<_, mlua::Table>("Coil") {
+            let mean_radius: f64 = match coil.get("mean_radius") {
+                Ok(v) => v,
+                Err(_) => return measurements,
+            };
+            let gap: f64 = coil.get("gap").unwrap_or(mean_radius);
+            let windings: f64 = coil.get("windings").unwrap_or(100.0);
+            let layers: f64 = coil.get("layers").unwrap_or(10.0);
+            let current: f64 = coil.get("current").unwrap_or(1.0);
+            (mean_radius, gap, windings, layers, current)
+        } else if let Ok(config) = globals.get::<_, mlua::Table>("config") {
+            let mean_radius: f64 = match config.get("coil_mean_radius") {
+                Ok(v) => v,
+                Err(_) => return measurements,
+            };
+            let gap: f64 = config.get("gap").unwrap_or(mean_radius);
+            let windings: f64 = config.get("windings").unwrap_or(100.0);
+            let layers: f64 = config.get("layers").unwrap_or(10.0);
+            let current: f64 = config.get("current").unwrap_or(1.0);
+            (mean_radius, gap, windings, layers, current)
+        } else {
+            return measurements;
         };
-        let gap: f64 = coil.get("gap").unwrap_or(mean_radius);
-        let windings: f64 = coil.get("windings").unwrap_or(100.0);
-        let layers: f64 = coil.get("layers").unwrap_or(10.0);
-        let current: f64 = coil.get("current").unwrap_or(1.0);
-        (mean_radius, gap, windings, layers, current)
-    } else if let Ok(config) = globals.get::<_, mlua::Table>("config") {
-        let mean_radius: f64 = match config.get("coil_mean_radius") {
-            Ok(v) => v,
-            Err(_) => return measurements,
-        };
-        let gap: f64 = config.get("gap").unwrap_or(mean_radius);
-        let windings: f64 = config.get("windings").unwrap_or(100.0);
-        let layers: f64 = config.get("layers").unwrap_or(10.0);
-        let current: f64 = config.get("current").unwrap_or(1.0);
-        (mean_radius, gap, windings, layers, current)
-    } else {
-        return measurements;
-    };
 
     let (wire_diameter, packing_factor) = if let Ok(wire) = globals.get::<_, mlua::Table>("Wire") {
         let diameter: f64 = wire.get("diameter").unwrap_or(0.8);
@@ -570,7 +602,9 @@ fn try_compute_probe_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::
             Err(_) => continue,
         };
 
-        let probe_type: String = config_table.get("type").unwrap_or_else(|_| "B_field".to_string());
+        let probe_type: String = config_table
+            .get("type")
+            .unwrap_or_else(|_| "B_field".to_string());
         if probe_type != "B_field" {
             continue;
         }
@@ -604,14 +638,20 @@ fn try_compute_probe_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::
         ];
 
         let num_points: usize = config_table.get::<_, u32>("points").unwrap_or(51) as usize;
-        let name: String = config_table.get("name").unwrap_or_else(|_| "probe".to_string());
+        let name: String = config_table
+            .get("name")
+            .unwrap_or_else(|_| "probe".to_string());
 
         let mut positions = Vec::with_capacity(num_points * 3);
         let mut values = Vec::with_capacity(num_points * 3);
         let mut magnitudes = Vec::with_capacity(num_points);
 
         for i in 0..num_points {
-            let t = if num_points > 1 { i as f64 / (num_points - 1) as f64 } else { 0.5 };
+            let t = if num_points > 1 {
+                i as f64 / (num_points - 1) as f64
+            } else {
+                0.5
+            };
             let point = [
                 start[0] + t * (stop[0] - start[0]),
                 start[1] + t * (stop[1] - start[1]),
@@ -643,7 +683,11 @@ fn try_compute_probe_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::
             let n = magnitudes.len() as f32;
             let sum: f32 = magnitudes.iter().sum();
             let mean = sum / n;
-            let variance: f32 = magnitudes.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / n;
+            let variance: f32 = magnitudes
+                .iter()
+                .map(|&x| (x - mean) * (x - mean))
+                .sum::<f32>()
+                / n;
             let std = variance.sqrt();
             let min = magnitudes.iter().cloned().fold(f32::INFINITY, f32::min);
             let max = magnitudes.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -651,7 +695,12 @@ fn try_compute_probe_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::
                 "Probe '{}' statistics: min={:.4}, max={:.4}, mean={:.4}, std={:.4}",
                 name, min, max, mean, std
             );
-            Some(field::ProbeStatistics { min, max, mean, std })
+            Some(field::ProbeStatistics {
+                min,
+                max,
+                mean,
+                std,
+            })
         } else {
             None
         };
@@ -675,37 +724,44 @@ fn try_compute_probe_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::
     measurements
 }
 
-fn try_compute_gaussmeter_measurements(lua: &mlua::Lua, content: &str) -> Vec<field::PointMeasurement> {
+fn try_compute_gaussmeter_measurements(
+    lua: &mlua::Lua,
+    content: &str,
+) -> Vec<field::PointMeasurement> {
     let mut measurements = Vec::new();
 
-    if !content.contains("helmholtz") && !content.contains("Coil") && !content.contains("coil_mean_radius") {
+    if !content.contains("helmholtz")
+        && !content.contains("Coil")
+        && !content.contains("coil_mean_radius")
+    {
         return measurements;
     }
 
     let globals = lua.globals();
-    let (coil_mean_radius, gap, windings, layers, current) = if let Ok(coil) = globals.get::<_, mlua::Table>("Coil") {
-        let mean_radius: f64 = match coil.get("mean_radius") {
-            Ok(v) => v,
-            Err(_) => return measurements,
+    let (coil_mean_radius, gap, windings, layers, current) =
+        if let Ok(coil) = globals.get::<_, mlua::Table>("Coil") {
+            let mean_radius: f64 = match coil.get("mean_radius") {
+                Ok(v) => v,
+                Err(_) => return measurements,
+            };
+            let gap: f64 = coil.get("gap").unwrap_or(mean_radius);
+            let windings: f64 = coil.get("windings").unwrap_or(100.0);
+            let layers: f64 = coil.get("layers").unwrap_or(10.0);
+            let current: f64 = coil.get("current").unwrap_or(1.0);
+            (mean_radius, gap, windings, layers, current)
+        } else if let Ok(config) = globals.get::<_, mlua::Table>("config") {
+            let mean_radius: f64 = match config.get("coil_mean_radius") {
+                Ok(v) => v,
+                Err(_) => return measurements,
+            };
+            let gap: f64 = config.get("gap").unwrap_or(mean_radius);
+            let windings: f64 = config.get("windings").unwrap_or(100.0);
+            let layers: f64 = config.get("layers").unwrap_or(10.0);
+            let current: f64 = config.get("current").unwrap_or(1.0);
+            (mean_radius, gap, windings, layers, current)
+        } else {
+            return measurements;
         };
-        let gap: f64 = coil.get("gap").unwrap_or(mean_radius);
-        let windings: f64 = coil.get("windings").unwrap_or(100.0);
-        let layers: f64 = coil.get("layers").unwrap_or(10.0);
-        let current: f64 = coil.get("current").unwrap_or(1.0);
-        (mean_radius, gap, windings, layers, current)
-    } else if let Ok(config) = globals.get::<_, mlua::Table>("config") {
-        let mean_radius: f64 = match config.get("coil_mean_radius") {
-            Ok(v) => v,
-            Err(_) => return measurements,
-        };
-        let gap: f64 = config.get("gap").unwrap_or(mean_radius);
-        let windings: f64 = config.get("windings").unwrap_or(100.0);
-        let layers: f64 = config.get("layers").unwrap_or(10.0);
-        let current: f64 = config.get("current").unwrap_or(1.0);
-        (mean_radius, gap, windings, layers, current)
-    } else {
-        return measurements;
-    };
 
     // Get Wire config for packing info
     let (wire_diameter, packing_factor) = if let Ok(wire) = globals.get::<_, mlua::Table>("Wire") {
@@ -759,8 +815,12 @@ fn try_compute_gaussmeter_measurements(lua: &mlua::Lua, content: &str) -> Vec<fi
         let y: f64 = position.get(2).unwrap_or(0.0);
         let z: f64 = position.get(3).unwrap_or(0.0);
 
-        let config_table: mlua::Table = inst.get("_config").unwrap_or_else(|_| lua.create_table().unwrap());
-        let label: String = config_table.get("label").unwrap_or_else(|_| "B".to_string());
+        let config_table: mlua::Table = inst
+            .get("_config")
+            .unwrap_or_else(|_| lua.create_table().unwrap());
+        let label: String = config_table
+            .get("label")
+            .unwrap_or_else(|_| "B".to_string());
 
         let b = field::compute_point_field(
             coil_inner_r,
@@ -776,7 +836,11 @@ fn try_compute_gaussmeter_measurements(lua: &mlua::Lua, content: &str) -> Vec<fi
 
         info!(
             "GaussMeter '{}' at ({:.1}, {:.1}, {:.1}): B = {:.4} mT",
-            label, x, y, z, magnitude * 1000.0
+            label,
+            x,
+            y,
+            z,
+            magnitude * 1000.0
         );
 
         measurements.push(field::PointMeasurement {
@@ -791,7 +855,10 @@ fn try_compute_gaussmeter_measurements(lua: &mlua::Lua, content: &str) -> Vec<fi
 }
 
 /// Process Hydrophone instruments and compute pressure at their positions
-fn try_compute_hydrophone_measurements(lua: &mlua::Lua, content: &str) -> Vec<(f64, f64, f64, f64, String)> {
+fn try_compute_hydrophone_measurements(
+    lua: &mlua::Lua,
+    content: &str,
+) -> Vec<(f64, f64, f64, f64, String)> {
     let mut measurements = Vec::new();
 
     let has_acoustic = content.contains("acoustic(")
@@ -877,8 +944,12 @@ fn try_compute_hydrophone_measurements(lua: &mlua::Lua, content: &str) -> Vec<(f
         let y: f64 = position.get(2).unwrap_or(0.0);
         let z: f64 = position.get(3).unwrap_or(0.0);
 
-        let config_table: mlua::Table = inst.get("_config").unwrap_or_else(|_| lua.create_table().unwrap());
-        let label: String = config_table.get("label").unwrap_or_else(|_| "P".to_string());
+        let config_table: mlua::Table = inst
+            .get("_config")
+            .unwrap_or_else(|_| lua.create_table().unwrap());
+        let label: String = config_table
+            .get("label")
+            .unwrap_or_else(|_| "P".to_string());
 
         // Convert position to cylindrical (r, z) for acoustic computation
         let r = (x * x + y * y).sqrt();
@@ -933,14 +1004,19 @@ fn try_compute_nanovna_sweep(lua: &mlua::Lua, content: &str) -> Option<nanovna::
 
     info!(
         "Computing NanoVNA sweep: {:.2} MHz - {:.2} MHz, {} points, R={:.1}mm, N={}",
-        f_start / 1e6, f_stop / 1e6, num_points, coil_radius, num_turns
+        f_start / 1e6,
+        f_stop / 1e6,
+        num_points,
+        coil_radius,
+        num_turns
     );
 
     let sweep = nanovna::compute_frequency_sweep(&config);
 
     info!(
         "NanoVNA min S11: {:.2} dB at {:.3} MHz",
-        sweep.min_s11_db, sweep.min_s11_freq / 1e6
+        sweep.min_s11_db,
+        sweep.min_s11_freq / 1e6
     );
 
     Some(sweep)
@@ -972,7 +1048,10 @@ fn try_generate_circuit(lua: &mlua::Lua, content: &str) -> Option<circuit::Circu
             "signal_generator" => {
                 let frequency: f64 = config.get("frequency").unwrap_or(1e6);
                 let amplitude: f64 = config.get("amplitude").unwrap_or(1.0);
-                circuit::CircuitComponent::SignalGenerator { frequency, amplitude }
+                circuit::CircuitComponent::SignalGenerator {
+                    frequency,
+                    amplitude,
+                }
             }
             "amplifier" => {
                 let gain: f64 = config.get("gain").unwrap_or(10.0);
@@ -987,7 +1066,8 @@ fn try_generate_circuit(lua: &mlua::Lua, content: &str) -> Option<circuit::Circu
                         let nanovna_config = nanovna::NanoVNAConfig {
                             f_start: nanovna_table.get("f_start").unwrap_or(1e6),
                             f_stop: nanovna_table.get("f_stop").unwrap_or(50e6),
-                            num_points: nanovna_table.get::<_, u32>("num_points").unwrap_or(101) as usize,
+                            num_points: nanovna_table.get::<_, u32>("num_points").unwrap_or(101)
+                                as usize,
                             coil_radius: nanovna_table.get("coil_radius").unwrap_or(25.0),
                             num_turns: nanovna_table.get("num_turns").unwrap_or(10),
                             wire_diameter: nanovna_table.get("wire_diameter").unwrap_or(0.5),
@@ -997,23 +1077,37 @@ fn try_generate_circuit(lua: &mlua::Lua, content: &str) -> Option<circuit::Circu
                             resonator_distance: 10.0,
                             resonator_resistance: 0.1,
                         };
-                        let (z_real, z_imag) = nanovna::compute_impedance_at_frequency(&nanovna_config, frequency);
+                        let (z_real, z_imag) =
+                            nanovna::compute_impedance_at_frequency(&nanovna_config, frequency);
                         info!("MatchingNetwork using NanoVNA impedance at {:.2} MHz: Z = {:.2} + j{:.2} Ohm", frequency / 1e6, z_real, z_imag);
                         (z_real, z_imag)
                     } else {
                         info!("MatchingNetwork use_nanovna=true but no NanoVNA config found, using defaults");
-                        (config.get("impedance_real").unwrap_or(50.0), config.get("impedance_imag").unwrap_or(0.0))
+                        (
+                            config.get("impedance_real").unwrap_or(50.0),
+                            config.get("impedance_imag").unwrap_or(0.0),
+                        )
                     }
                 } else {
-                    (config.get("impedance_real").unwrap_or(50.0), config.get("impedance_imag").unwrap_or(0.0))
+                    (
+                        config.get("impedance_real").unwrap_or(50.0),
+                        config.get("impedance_imag").unwrap_or(0.0),
+                    )
                 };
 
-                circuit::CircuitComponent::MatchingNetwork { impedance_real, impedance_imag, frequency }
+                circuit::CircuitComponent::MatchingNetwork {
+                    impedance_real,
+                    impedance_imag,
+                    frequency,
+                }
             }
             "transducer_load" => {
                 let impedance_real: f64 = config.get("impedance_real").unwrap_or(50.0);
                 let impedance_imag: f64 = config.get("impedance_imag").unwrap_or(0.0);
-                circuit::CircuitComponent::TransducerLoad { impedance_real, impedance_imag }
+                circuit::CircuitComponent::TransducerLoad {
+                    impedance_real,
+                    impedance_imag,
+                }
             }
             _ => continue,
         };
@@ -1027,7 +1121,9 @@ fn try_generate_circuit(lua: &mlua::Lua, content: &str) -> Option<circuit::Circu
 
     info!(
         "Generating circuit diagram: {} components, {}x{}",
-        components.len(), width, height
+        components.len(),
+        width,
+        height
     );
 
     Some(circuit::generate_circuit_svg(&components, width, height))
@@ -1052,12 +1148,20 @@ struct Label {
     color: String,
 }
 
-fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Path) -> Result<ProcessResult> {
+fn process_single_file(
+    lua: &mlua::Lua,
+    content: &str,
+    base_dir: &std::path::Path,
+) -> Result<ProcessResult> {
     // Clear scene state before each execution to prevent accumulation
-    let _ = lua.load(r#"
+    let _ = lua
+        .load(
+            r#"
         local loaded = package.loaded["stdlib"] or package.loaded["stdlib.init"]
         if loaded and loaded.clear then loaded.clear() end
-    "#).exec();
+    "#,
+        )
+        .exec();
 
     let result: mlua::Value = lua.load(content).eval()?;
 
@@ -1085,7 +1189,13 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                         tgt_t.get::<_, f32>(2).unwrap_or(0.0),
                         tgt_t.get::<_, f32>(3).unwrap_or(0.0),
                     ];
-                    Some(CameraState { position, target, fov: fov_v, near, far })
+                    Some(CameraState {
+                        position,
+                        target,
+                        fov: fov_v,
+                        near,
+                        far,
+                    })
                 } else {
                     None
                 }
@@ -1101,8 +1211,13 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         (false, 32, None)
     };
 
-    info!("Using Manifold backend for CSG, circular_segments={}", circular_segments);
-    let mesh = geometry::generate_mesh_from_lua_manifold(lua, &result, circular_segments)?;
+    let scene_ir = ir::scene_from_lua_value(&result)?;
+    let scene_hash = ir::scene_hash(&scene_ir).unwrap_or_else(|_| "unknown".to_string());
+    info!(
+        "Using IR -> Manifold backend for CSG, circular_segments={}, scene_hash={}",
+        circular_segments, scene_hash
+    );
+    let mesh = geometry::generate_mesh_from_ir_scene(&scene_ir, circular_segments)?;
 
     if let Some(table) = result.as_table() {
         export::process_exports_from_table(lua, table, base_dir);
@@ -1119,8 +1234,16 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
                     let y: f32 = label.get("y").unwrap_or(0.0);
                     let z: f32 = label.get("z").unwrap_or(0.0);
                     let size: f32 = label.get("size").unwrap_or(5.0);
-                    let color: String = label.get("color").unwrap_or_else(|_| "#ffffff".to_string());
-                    labels.push(Label { text, x, y, z, size, color });
+                    let color: String =
+                        label.get("color").unwrap_or_else(|_| "#ffffff".to_string());
+                    labels.push(Label {
+                        text,
+                        x,
+                        y,
+                        z,
+                        size,
+                        color,
+                    });
                 }
             }
             info!("Extracted {} labels", labels.len());
@@ -1132,23 +1255,35 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         Vec::new()
     };
 
-    Ok(ProcessResult { mesh, flat_shading, circular_segments, camera, labels })
+    Ok(ProcessResult {
+        mesh,
+        flat_shading,
+        circular_segments,
+        camera,
+        labels,
+    })
 }
 
 async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>) {
     let (notify_tx, mut notify_rx) = mpsc::channel::<PathBuf>(10);
 
-    let mut debouncer = new_debouncer(Duration::from_millis(200), move |res: DebounceEventResult| {
-        if let Ok(events) = res {
-            for event in events {
-                let _ = notify_tx.blocking_send(event.path);
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(200),
+        move |res: DebounceEventResult| {
+            if let Ok(events) = res {
+                for event in events {
+                    let _ = notify_tx.blocking_send(event.path);
+                }
             }
-        }
-    })
+        },
+    )
     .unwrap();
 
     let watch_dir = path.parent().unwrap_or(&path);
-    debouncer.watcher().watch(watch_dir, RecursiveMode::NonRecursive).unwrap();
+    debouncer
+        .watcher()
+        .watch(watch_dir, RecursiveMode::NonRecursive)
+        .unwrap();
 
     info!("Watching directory: {:?}", watch_dir);
 
