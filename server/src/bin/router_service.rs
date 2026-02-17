@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::{connect_async, connect_async_with_config};
 use tokio_tungstenite::tungstenite;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
@@ -916,7 +916,22 @@ async fn proxy_ws_connection(
         "proxy connect renderer_id='{}' backend_id='{}' target='{}' client='{}'",
         renderer_id, backend_id, target_url, client_addr
     );
-    let upstream = connect_async(&target_url).await;
+
+    // Large CAD payloads can exceed tungstenite's default max_frame_size (16 MiB).
+    // If we keep the default, the router will disconnect as soon as a large mesh arrives.
+    let max_frame_mb: usize = std::env::var("MITTENS_ROUTER_MAX_WS_FRAME_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let max_message_mb: usize = std::env::var("MITTENS_ROUTER_MAX_WS_MESSAGE_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256);
+    let mut ws_cfg = tungstenite::protocol::WebSocketConfig::default();
+    ws_cfg.max_frame_size = Some(max_frame_mb.saturating_mul(1024 * 1024));
+    ws_cfg.max_message_size = Some(max_message_mb.saturating_mul(1024 * 1024));
+
+    let upstream = connect_async_with_config(&target_url, Some(ws_cfg), false).await;
     let (upstream_socket, _) = match upstream {
         Ok(tuple) => tuple,
         Err(err) => {

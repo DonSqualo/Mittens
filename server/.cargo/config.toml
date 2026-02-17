@@ -1,0 +1,5 @@
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# OCCT builds are large; keep compile parallelism bounded to avoid pegging CPUs.
+CMAKE_BUILD_PARALLEL_LEVEL = "4"
+MAKEFLAGS = "-j4"
