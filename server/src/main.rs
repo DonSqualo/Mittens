@@ -601,9 +601,10 @@ fn process_project_files(
                 match mesh_step_cached_or_run(&file_path, deflection_coarse) {
                     Ok((mesh_binary, cache_hit)) => {
                         info!(
-                            "STEP coarse mesh packet: {} bytes (deflection={})",
+                            "STEP coarse mesh packet: {} bytes (deflection={}) cache_hit={}",
                             mesh_binary.len(),
-                            deflection_coarse
+                            deflection_coarse,
+                            cache_hit
                         );
                         if let Some((nv, ni)) = parse_mesh_stats(&mesh_binary) {
                             let tris = (ni / 3) as u64;
@@ -662,9 +663,10 @@ fn process_project_files(
                     match mesh_step_cached_or_run(&file_path, deflection_fine) {
                         Ok((mesh_binary, cache_hit)) => {
                             info!(
-                                "STEP refined mesh packet: {} bytes (deflection={})",
+                                "STEP refined mesh packet: {} bytes (deflection={}) cache_hit={}",
                                 mesh_binary.len(),
-                                deflection_fine
+                                deflection_fine,
+                                cache_hit
                             );
                             if let Some((nv, ni)) = parse_mesh_stats(&mesh_binary) {
                                 let tris = (ni / 3) as u64;
