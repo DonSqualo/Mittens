@@ -6,6 +6,12 @@ import { Text } from 'troika-three-text';
 const canvas = document.getElementById('main-canvas') as HTMLCanvasElement;
 const container = document.getElementById('main-view')!;
 
+// Query params (available globally; used for storage keys and debug toggles)
+const initial_query = new URLSearchParams(window.location.search);
+const current_backend_id = initial_query.get('backend_id') || '';
+const CAMERA_STORAGE_KEY = current_backend_id ? `mittens_camera:${current_backend_id}` : 'mittens_camera';
+const DEBUG_WS = initial_query.get('debug') === '1' || localStorage.getItem('mittens_debug') === '1';
+
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x000000, 1);
@@ -31,7 +37,7 @@ controls.dampingFactor = 0.05;
 controls.target.copy(DEFAULT_CAMERA.target);
 
 // Restore camera from localStorage (survives page reloads)
-const saved_camera = localStorage.getItem('mittens_camera');
+const saved_camera = localStorage.getItem(CAMERA_STORAGE_KEY);
 if (saved_camera) {
   try {
     const state = JSON.parse(saved_camera);
@@ -53,7 +59,7 @@ controls.addEventListener('end', () => {
     tgt: [controls.target.x, controls.target.y, controls.target.z],
     fov: camera.fov
   };
-  localStorage.setItem('mittens_camera', JSON.stringify(state));
+  localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify(state));
 });
 
 // Track last Lua camera to avoid resetting on unchanged reloads
@@ -88,6 +94,44 @@ let circuit_width = 400; // Store circuit width for positioning
 const download_stl_btn = document.getElementById('download-stl-btn') as HTMLButtonElement | null;
 let current_ws: WebSocket | null = null;
 let current_export_files: string[] = [];
+
+let did_auto_frame = false;
+
+// Loading bar (bottom)
+const loading_bar_el = document.getElementById('loading-bar') as HTMLDivElement | null;
+const loading_text_el = document.getElementById('loading-bar-text') as HTMLDivElement | null;
+const loading_elapsed_el = document.getElementById('loading-bar-elapsed') as HTMLDivElement | null;
+let loading_since_ms: number | null = null;
+let loading_timer: number | null = null;
+
+function set_loading_bar(state: 'idle' | 'meshing' | 'ready' | 'error', detail?: string) {
+  if (!loading_bar_el || !loading_text_el || !loading_elapsed_el) return;
+
+  if (state === 'idle' || state === 'ready') {
+    loading_bar_el.classList.remove('visible', 'state-error');
+    loading_since_ms = null;
+    if (loading_timer) {
+      window.clearInterval(loading_timer);
+      loading_timer = null;
+    }
+    return;
+  }
+
+  loading_bar_el.classList.add('visible');
+  loading_bar_el.classList.toggle('state-error', state === 'error');
+  loading_text_el.textContent = detail || (state === 'meshing' ? 'Meshing...' : 'Error');
+  if (loading_since_ms === null) loading_since_ms = Date.now();
+
+  const updateElapsed = () => {
+    if (loading_since_ms === null) return;
+    const s = Math.max(0, Math.floor((Date.now() - loading_since_ms) / 1000));
+    loading_elapsed_el.textContent = `${s}s`;
+  };
+  updateElapsed();
+  if (!loading_timer) {
+    loading_timer = window.setInterval(updateElapsed, 250);
+  }
+}
 
 // Graph canvas (defined in HTML, hidden by default)
 const graph_canvas = document.getElementById('graph-canvas') as HTMLCanvasElement;
@@ -323,12 +367,18 @@ type ColormapFn = (t: number) => THREE.Color;
 function parse_binary_mesh(buffer: ArrayBuffer): { geometry: THREE.BufferGeometry, edges: number } | null {
   const view = new DataView(buffer);
 
-  if (buffer.byteLength < 8) return null;
+  if (buffer.byteLength < 8) {
+    if (DEBUG_WS) console.warn(`[mesh] buffer too small: ${buffer.byteLength} bytes`);
+    return null;
+  }
 
   const numVertices = view.getUint32(0, true);
   const numIndices = view.getUint32(4, true);
 
-  if (numVertices === 0 || numIndices === 0) return null;
+  if (numVertices === 0 || numIndices === 0) {
+    if (DEBUG_WS) console.warn(`[mesh] empty counts: vertices=${numVertices} indices=${numIndices}`);
+    return null;
+  }
 
   const positionsOffset = 8;
   const normalsOffset = positionsOffset + numVertices * 3 * 4;
@@ -347,10 +397,11 @@ function parse_binary_mesh(buffer: ArrayBuffer): { geometry: THREE.BufferGeometr
   const indices = new Uint32Array(buffer, indicesOffset, numIndices);
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
-  geometry.setAttribute('normal', new THREE.BufferAttribute(normals.slice(), 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
-  geometry.setIndex(new THREE.BufferAttribute(indices.slice(), 1));
+  // Avoid copying large meshes: attributes can safely reference the WebSocket ArrayBuffer.
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
 
   // Triangles have 3 edges each (though shared edges counted once would be ~1.5x triangles)
   const numTriangles = numIndices / 3;
@@ -359,6 +410,39 @@ function parse_binary_mesh(buffer: ArrayBuffer): { geometry: THREE.BufferGeometr
   console.log(`Mesh: ${numVertices} vertices, ${numTriangles} triangles, ${numEdges} edges`);
 
   return { geometry, edges: numEdges };
+}
+
+function auto_frame_geometry(geometry: THREE.BufferGeometry, reason: string) {
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box) return;
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  box.getCenter(center);
+  box.getSize(size);
+  const radius = Math.max(size.x, size.y, size.z) * 0.5;
+  if (!Number.isFinite(radius) || radius <= 0) {
+    if (DEBUG_WS) console.warn(`[camera] auto-frame skipped (bad radius): radius=${radius}`);
+    return;
+  }
+
+  const fovRad = THREE.MathUtils.degToRad(camera.fov);
+  const dist = (radius / Math.tan(fovRad * 0.5)) * 1.25;
+  const dir = new THREE.Vector3(1, 1, 1).normalize();
+  camera.position.copy(center).addScaledVector(dir, dist);
+  controls.target.copy(center);
+
+  // Conservative clip planes based on distance and radius.
+  camera.near = Math.max(0.1, dist / 200);
+  camera.far = Math.max(1000, dist + radius * 10);
+  camera.updateProjectionMatrix();
+  controls.update();
+
+  if (DEBUG_WS) {
+    console.log(
+      `[camera] auto-framed (${reason}) center=(${center.x.toFixed(2)},${center.y.toFixed(2)},${center.z.toFixed(2)}) size=(${size.x.toFixed(2)},${size.y.toFixed(2)},${size.z.toFixed(2)}) dist=${dist.toFixed(2)} near=${camera.near.toFixed(2)} far=${camera.far.toFixed(0)}`
+    );
+  }
 }
 
 function create_edge_overlay(geometry: THREE.BufferGeometry): THREE.LineSegments {
@@ -1025,6 +1109,10 @@ function update_mesh(buffer: ArrayBuffer) {
   const header = new Uint8Array(buffer, 0, 8);
   const header_5 = String.fromCharCode(...header.slice(0, 5));
   const header_8 = String.fromCharCode(...header);
+  if (DEBUG_WS) {
+    const asText = header_8.replace(/[^\x20-\x7E]/g, '.');
+    console.log(`[update_mesh] len=${buffer.byteLength} header8='${asText}' header5='${header_5.replace(/[^\x20-\x7E]/g, '.')}'`);
+  }
 
   // Handle view config
   if (header_8.startsWith('VIEW')) {
@@ -1068,7 +1156,7 @@ function update_mesh(buffer: ArrayBuffer) {
         controls.update();
         last_lua_camera_key = lua_key;
         // Clear localStorage when Lua explicitly sets camera
-        localStorage.removeItem('mittens_camera');
+        localStorage.removeItem(CAMERA_STORAGE_KEY);
         console.log(`View config: flat_shading=${flat_shading}, show_edges=${show_edges}, camera=(${cam_x}, ${cam_y}, ${cam_z}), target=(${tgt_x}, ${tgt_y}, ${tgt_z}), fov=${fov}, near=${near}, far=${far}`);
       } else {
         console.log(`View config: flat_shading=${flat_shading}, show_edges=${show_edges}, camera unchanged (keeping user position)`);
@@ -1193,14 +1281,28 @@ function update_mesh(buffer: ArrayBuffer) {
   const result = parse_binary_mesh(buffer);
   if (!result) return;
 
+  // We received a real mesh payload; dismiss the "meshing" strip if it was shown.
+  set_loading_bar('ready');
+
   last_edge_count = result.edges;
 
   const material = create_xray_material(flat_shading);
   current_mesh = new THREE.Mesh(result.geometry, material);
+  // Skip frustum culling to avoid expensive bounding volume computation on huge meshes.
+  current_mesh.frustumCulled = false;
   scene.add(current_mesh);
+
+  // If there is no backend-specific saved camera and no Lua-provided home camera,
+  // auto-frame the first mesh so "first launch" isn't a blank screen.
+  if (!did_auto_frame && !home_camera && !localStorage.getItem(CAMERA_STORAGE_KEY)) {
+    did_auto_frame = true;
+    auto_frame_geometry(result.geometry, 'first mesh');
+  }
+
   refresh_download_button_state();
   if (show_edges) {
     current_edges = create_edge_overlay(result.geometry);
+    current_edges.frustumCulled = false;
     scene.add(current_edges);
   }
 }
@@ -1299,8 +1401,6 @@ let last_render_ms = 0;
 
 // Server info (file, branch, port)
 let server_info: { file: string; branch: string; port: number } | null = null;
-const initial_query = new URLSearchParams(window.location.search);
-const current_backend_id = initial_query.get('backend_id') || '';
 const configured_renderer_id = (import.meta.env.VITE_MITTENS_RENDERER_ID as string | undefined)?.trim();
 const configured_renderer_branch = (import.meta.env.VITE_MITTENS_RENDERER_BRANCH as string | undefined)?.trim();
 
@@ -1381,6 +1481,9 @@ function connect_websocket() {
     ? `/ws/${encodeURIComponent(backend_id)}?${ws_query_suffix}`
     : `/ws/${encodeURIComponent(backend_id)}`;
 
+  if (DEBUG_WS) {
+    console.log(`[ws] connecting backend_id='${backend_id}' renderer_id='${configured_renderer_id || ''}' path='${ws_path}'`);
+  }
   const ws = new WebSocket(`${ws_scheme}://${window.location.host}${ws_path}`);
   current_ws = ws;
   ws.binaryType = 'arraybuffer';
@@ -1390,14 +1493,53 @@ function connect_websocket() {
     update_status('connected', 'Waiting for data...');
   };
 
-  ws.onmessage = (event) => {
-    if (event.data instanceof ArrayBuffer) {
-      if (try_handle_export_packet(event.data)) return;
+  // Coalesce large binary updates so we don't thrash the UI if the server sends multiple meshes
+  // (e.g. progressive STEP LODs). Only the latest pending buffer is applied each frame.
+  let pending_binary: ArrayBuffer | null = null;
+  let apply_scheduled = false;
+  const schedule_apply_binary = () => {
+    if (apply_scheduled) return;
+    apply_scheduled = true;
+    requestAnimationFrame(() => {
+      apply_scheduled = false;
+      const buf = pending_binary;
+      pending_binary = null;
+      if (!buf) return;
       const start = performance.now();
-      update_mesh(event.data);
+      update_mesh(buf);
       last_render_ms = performance.now() - start;
       last_update_time = new Date();
       update_status_display();
+      if (pending_binary) schedule_apply_binary();
+    });
+  };
+
+  let debug_binary_seen = 0;
+  ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      if (DEBUG_WS && debug_binary_seen < 25) {
+        debug_binary_seen++;
+        const u8 = new Uint8Array(event.data, 0, Math.min(16, event.data.byteLength));
+        const header8 = (() => {
+          const slice = new Uint8Array(event.data, 0, Math.min(8, event.data.byteLength));
+          let s = '';
+          for (const b of slice) s += (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.';
+          return s;
+        })();
+        let meshHint = '';
+        if (event.data.byteLength >= 8) {
+          const dv = new DataView(event.data);
+          const v = dv.getUint32(0, true);
+          const i = dv.getUint32(4, true);
+          if (v > 0 && i > 0 && v < 200_000_000 && i < 600_000_000) {
+            meshHint = ` counts(v=${v}, i=${i})`;
+          }
+        }
+        console.log(`[ws] binary len=${event.data.byteLength} header8='${header8}' first16=[${Array.from(u8).join(',')}]${meshHint}`);
+      }
+      if (try_handle_export_packet(event.data)) return;
+      pending_binary = event.data;
+      schedule_apply_binary();
     } else if (typeof event.data === 'string') {
       // JSON message - could be labels, info, or other metadata
       try {
@@ -1425,6 +1567,15 @@ function connect_websocket() {
             download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
           }
           refresh_download_button_state();
+        } else if (msg.type === 'status') {
+          const state = (typeof msg.state === 'string') ? msg.state : 'status';
+          const detail = (typeof msg.detail === 'string') ? msg.detail : undefined;
+          if (DEBUG_WS) console.log(`[status] ${state}${detail ? `: ${detail}` : ''}`);
+          // Keep using the existing HUD; map custom status to a detail line.
+          update_status('connected', detail || state);
+          if (state === 'meshing') set_loading_bar('meshing', detail || 'Meshing...');
+          else if (state === 'ready') set_loading_bar('ready');
+          else if (state === 'error') set_loading_bar('error', detail || 'Error');
         }
       } catch (e) {
         console.warn('Failed to parse JSON message:', e);
@@ -1580,7 +1731,7 @@ function reset_camera() {
   }
   camera.updateProjectionMatrix();
   controls.update();
-  localStorage.removeItem('mittens_camera');
+  localStorage.removeItem(CAMERA_STORAGE_KEY);
   update_camera_display();
   console.log('Camera reset to home position');
   // Visual feedback

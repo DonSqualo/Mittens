@@ -4,6 +4,7 @@ node_modules/
 # Build outputs
 dist/
 target/
+server/target
 
 # Logs
 *.log
@@ -27,5 +28,9 @@ test-results/
 node_modules/
 screenshots/
 *.stl
+*.gcode
 .venv/
 .mittens/
+
+# Generated exports (dev-only)
+examples/exports/

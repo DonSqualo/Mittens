@@ -4,7 +4,7 @@
 //! - Manifold mesh generation
 //! - WebSocket binary mesh streaming
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -24,6 +24,7 @@ use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
 mod acoustic;
+mod cad_io;
 mod circuit;
 mod export;
 mod field;
@@ -32,19 +33,133 @@ mod ir;
 mod nanovna;
 mod thread_primitives;
 
+type Packet = Arc<[u8]>;
+
 struct AppState {
-    mesh_tx: broadcast::Sender<Vec<u8>>,
+    mesh_tx: broadcast::Sender<Packet>,
     labels_tx: broadcast::Sender<String>,
     exports_tx: broadcast::Sender<String>,
-    current_mesh: RwLock<Option<Vec<u8>>>,
-    current_field: RwLock<Option<Vec<u8>>>,
-    current_circuit: RwLock<Option<Vec<u8>>>,
-    current_nanovna: RwLock<Option<Vec<u8>>>,
+    current_view: RwLock<Option<Packet>>,
+    current_mesh: RwLock<Option<Packet>>,
+    current_field: RwLock<Option<Packet>>,
+    current_circuit: RwLock<Option<Packet>>,
+    current_nanovna: RwLock<Option<Packet>>,
     current_labels: RwLock<Option<String>>,
     current_exports: RwLock<Vec<String>>,
     watched_file: String,
     git_branch: String,
     port: u16,
+}
+
+fn packet_from_vec(v: Vec<u8>) -> Packet {
+    Arc::from(v.into_boxed_slice())
+}
+
+fn step_mesher_path() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("MITTENS_STEP_MESHER_PATH") {
+        return Ok(PathBuf::from(p));
+    }
+
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve current_exe parent dir"))?;
+    Ok(dir.join("step_mesher"))
+}
+
+fn default_step_deflection_for_path(path: &PathBuf) -> f64 {
+    let sz = std::fs::metadata(path).ok().map(|m| m.len()).unwrap_or(0);
+    if sz > 150 * 1024 * 1024 {
+        30.0
+    } else if sz > 50 * 1024 * 1024 {
+        10.0
+    } else {
+        0.05
+    }
+}
+
+fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>> {
+    let mesher = step_mesher_path()?;
+
+    // Keep meshing isolated and bounded; OCCT can use huge amounts of memory on large assemblies.
+    // Use `prlimit` (if available) to cap address space for the mesher process so the parent
+    // server stays alive and the system doesn't get dragged into OOM-killer territory.
+    let max_as_mb: u64 = std::env::var("MITTENS_STEP_MESHER_MAX_AS_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12_000);
+
+    let mut cmd = if max_as_mb == 0 {
+        std::process::Command::new(&mesher)
+    } else {
+        let max_as_bytes = max_as_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024);
+        let mut c = std::process::Command::new("prlimit");
+        c.arg(format!("--as={}", max_as_bytes))
+            .arg("--")
+            .arg(&mesher);
+        c
+    };
+
+    let tmp_dir = std::env::var_os("MITTENS_STEP_MESHER_TMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir());
+    let nonce = format!(
+        "mittens_step_{}_{}_{}.bin",
+        std::process::id(),
+        deflection.to_string().replace('.', "_"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let out_path = tmp_dir.join(nonce);
+
+    let output = cmd
+        .arg("--deflection")
+        .arg(deflection.to_string())
+        .arg("--out")
+        .arg(&out_path)
+        .arg(input)
+        // Some OCCT builds can emit diagnostics on stdout; avoid corrupting binary output.
+        .stdout(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to spawn step mesher {}: {}",
+                mesher.display(),
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = if stderr.len() > 16 * 1024 {
+            format!("{}...[truncated]", &stderr[..16 * 1024])
+        } else {
+            stderr.to_string()
+        };
+        return Err(anyhow::anyhow!(
+            "step mesher failed (status={}) stderr={}",
+            output.status,
+            stderr
+        ));
+    }
+
+    let bytes = std::fs::read(&out_path)
+        .with_context(|| format!("failed to read step mesher output {}", out_path.display()))?;
+    let _ = std::fs::remove_file(&out_path);
+
+    // Minimal sanity check: [u32 num_vertices][u32 num_indices]
+    if bytes.len() < 8 {
+        return Err(anyhow::anyhow!(
+            "step mesher produced too little output: {} bytes",
+            bytes.len()
+        ));
+    }
+
+    Ok(bytes)
 }
 
 #[tokio::main]
@@ -72,11 +187,11 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
 
-    let (mesh_tx, _) = broadcast::channel::<Vec<u8>>(16);
+    let (mesh_tx, _) = broadcast::channel::<Packet>(16);
     let (labels_tx, _) = broadcast::channel::<String>(16);
     let (exports_tx, _) = broadcast::channel::<String>(16);
-    let (lua_tx, lua_rx) = mpsc::unbounded_channel::<(String, PathBuf)>();
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (project_tx, project_rx) = mpsc::unbounded_channel::<PathBuf>();
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Packet>();
     let (labels_result_tx, mut labels_result_rx) = mpsc::unbounded_channel::<String>();
     let (exports_result_tx, mut exports_result_rx) = mpsc::unbounded_channel::<Vec<String>>();
 
@@ -84,13 +199,14 @@ async fn main() -> Result<()> {
     let labels_tx_clone = labels_result_tx.clone();
     let exports_tx_clone = exports_result_tx.clone();
     thread::spawn(move || {
-        process_lua_files(lua_rx, result_tx, labels_tx_clone, exports_tx_clone);
+        process_project_files(project_rx, result_tx, labels_tx_clone, exports_tx_clone);
     });
 
     let state = Arc::new(AppState {
         mesh_tx: mesh_tx.clone(),
         labels_tx: labels_tx.clone(),
         exports_tx: exports_tx.clone(),
+        current_view: RwLock::new(None),
         current_mesh: RwLock::new(None),
         current_field: RwLock::new(None),
         current_circuit: RwLock::new(None),
@@ -106,11 +222,15 @@ async fn main() -> Result<()> {
     let state_clone = state.clone();
     tokio::spawn(async move {
         while let Some(data) = result_rx.recv().await {
-            let is_field = data.len() >= 5 && &data[0..5] == b"FIELD";
-            let is_circuit = data.len() >= 8 && &data[0..8] == b"CIRCUIT\0";
-            let is_nanovna = data.len() >= 8 && &data[0..8] == b"NANOVNA\0";
+            let bytes = data.as_ref();
+            let is_field = bytes.len() >= 5 && &bytes[0..5] == b"FIELD";
+            let is_circuit = bytes.len() >= 8 && &bytes[0..8] == b"CIRCUIT\0";
+            let is_nanovna = bytes.len() >= 8 && &bytes[0..8] == b"NANOVNA\0";
+            let is_view = bytes.len() >= 4 && &bytes[0..4] == b"VIEW";
 
-            if is_field {
+            if is_view {
+                *state_clone.current_view.write().await = Some(data.clone());
+            } else if is_field {
                 *state_clone.current_field.write().await = Some(data.clone());
             } else if is_circuit {
                 *state_clone.current_circuit.write().await = Some(data.clone());
@@ -146,16 +266,14 @@ async fn main() -> Result<()> {
 
     // Load initial file
     if file_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&file_path) {
-            let _ = lua_tx.send((content, file_path.clone()));
-        }
+        let _ = project_tx.send(file_path.clone());
     }
 
     // File watcher
-    let lua_tx_clone = lua_tx.clone();
+    let project_tx_clone = project_tx.clone();
     let watch_path = file_path.clone();
     tokio::spawn(async move {
-        watch_file(watch_path, lua_tx_clone).await;
+        watch_file(watch_path, project_tx_clone).await;
     });
 
     let app = Router::new()
@@ -207,16 +325,17 @@ fn serialize_view_config(flat_shading: bool, show_edges: bool, camera: Option<Ca
     data
 }
 
-fn process_lua_files(
-    mut rx: mpsc::UnboundedReceiver<(String, PathBuf)>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+fn process_project_files(
+    mut rx: mpsc::UnboundedReceiver<PathBuf>,
+    tx: mpsc::UnboundedSender<Packet>,
     labels_tx: mpsc::UnboundedSender<String>,
     exports_tx: mpsc::UnboundedSender<Vec<String>>,
 ) {
     let lua = mlua::Lua::new();
 
     // Set up package path to include stdlib directory
-    let package_path = lua.globals()
+    let package_path = lua
+        .globals()
         .get::<_, mlua::Table>("package")
         .and_then(|p| p.get::<_, String>("path"))
         .unwrap_or_default();
@@ -228,15 +347,167 @@ fn process_lua_files(
         let _ = package.set("path", new_path);
     }
 
-    while let Some((content, file_path)) = rx.blocking_recv() {
+    while let Some(file_path) = rx.blocking_recv() {
         let base_dir = file_path.parent().unwrap_or(std::path::Path::new("."));
 
-        // Process mesh and exports
-        match process_single_file(&lua, &content, base_dir) {
+        let kind = match cad_io::detect_project_kind(&file_path) {
+            Ok(kind) => kind,
+            Err(e) => {
+                error!("Project file type error: {}", e);
+                continue;
+            }
+        };
+
+        let mut lua_content: Option<String> = None;
+        let process_result = match kind {
+            cad_io::ProjectKind::Lua => {
+                let content = match std::fs::read_to_string(&file_path) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        error!("Failed to read Lua file {}: {}", file_path.display(), e);
+                        continue;
+                    }
+                };
+                lua_content = Some(content.clone());
+                process_single_file(&lua, &content, base_dir)
+            }
+            cad_io::ProjectKind::Stl => {
+                let file_name = file_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| file_path.display().to_string());
+                cad_io::load_mesh_from_path(&file_path).map(|mesh| ProcessResult {
+                    mesh,
+                    flat_shading: false,
+                    show_edges: false,
+                    circular_segments: 32,
+                    camera: None,
+                    labels: Vec::new(),
+                    exports: vec![file_name],
+                })
+            }
+            cad_io::ProjectKind::Step => {
+                let file_name = file_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| file_path.display().to_string());
+
+                // Keep STEP meshing out-of-process; OCCT can OOM/abort on large assemblies.
+                // View config first so the renderer can get into a known state immediately.
+                let view_binary = serialize_view_config(false, false, None);
+                let _ = tx.send(packet_from_vec(view_binary));
+
+                let deflection_fine = std::env::var("MITTENS_STEP_DEFLECTION")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_else(|| default_step_deflection_for_path(&file_path));
+                let deflection_coarse = std::env::var("MITTENS_STEP_DEFLECTION_COARSE")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_else(|| (deflection_fine * 3.0).max(deflection_fine));
+
+                let refine = std::env::var("MITTENS_STEP_REFINE")
+                    .ok()
+                    .map(|v| {
+                        let v = v.trim().to_ascii_lowercase();
+                        v == "1" || v == "true" || v == "yes" || v == "on"
+                    })
+                    .unwrap_or(false);
+
+                // First pass: coarse mesh for quick interactivity.
+                let _ = labels_tx.send(
+                    serde_json::json!({
+                        "type": "status",
+                        "state": "meshing",
+                        "detail": format!("STEP meshing (coarse deflection={})", deflection_coarse),
+                    })
+                    .to_string(),
+                );
+                match mesh_step_via_subprocess(&file_path, deflection_coarse) {
+                    Ok(mesh_binary) => {
+                        info!(
+                            "STEP coarse mesh packet: {} bytes (deflection={})",
+                            mesh_binary.len(),
+                            deflection_coarse
+                        );
+                        let _ = tx.send(packet_from_vec(mesh_binary));
+                        let _ = exports_tx.send(vec![file_name.clone()]);
+                        let _ = labels_tx.send(
+                            serde_json::json!({
+                                "type": "status",
+                                "state": "ready",
+                                "detail": "STEP coarse mesh ready",
+                            })
+                            .to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        error!("STEP coarse meshing error: {}", e);
+                        let _ = labels_tx.send(
+                            serde_json::json!({
+                                "type": "status",
+                                "state": "error",
+                                "detail": format!("STEP meshing failed: {}", e),
+                            })
+                            .to_string(),
+                        );
+                    }
+                };
+
+                // Second pass: optional refinement, only if it is actually finer.
+                if refine && deflection_fine < deflection_coarse {
+                    let _ = labels_tx.send(
+                        serde_json::json!({
+                            "type": "status",
+                            "state": "meshing",
+                            "detail": format!("STEP meshing (refine deflection={})", deflection_fine),
+                        })
+                        .to_string(),
+                    );
+                    match mesh_step_via_subprocess(&file_path, deflection_fine) {
+                        Ok(mesh_binary) => {
+                            info!(
+                                "STEP refined mesh packet: {} bytes (deflection={})",
+                                mesh_binary.len(),
+                                deflection_fine
+                            );
+                            let _ = tx.send(packet_from_vec(mesh_binary));
+                            let _ = exports_tx.send(vec![file_name]);
+                            let _ = labels_tx.send(
+                                serde_json::json!({
+                                    "type": "status",
+                                    "state": "ready",
+                                    "detail": "STEP refined mesh ready",
+                                })
+                                .to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            error!("STEP refined meshing error: {}", e);
+                            let _ = labels_tx.send(
+                                serde_json::json!({
+                                    "type": "status",
+                                    "state": "error",
+                                    "detail": format!("STEP refine failed: {}", e),
+                                })
+                                .to_string(),
+                            );
+                        }
+                    };
+                }
+
+                // STEP path doesn't use Lua post-processing (fields/circuits/etc).
+                continue;
+            }
+        };
+
+        match process_result {
             Ok(result) => {
                 // Send view config first
                 let view_binary = serialize_view_config(result.flat_shading, result.show_edges, result.camera);
-                let _ = tx.send(view_binary);
+                let _ = tx.send(packet_from_vec(view_binary));
 
                 let binary = result.mesh.to_binary();
                 info!(
@@ -246,7 +517,7 @@ fn process_lua_files(
                     binary.len(),
                     result.flat_shading
                 );
-                let _ = tx.send(binary);
+                let _ = tx.send(packet_from_vec(binary));
                 let _ = exports_tx.send(result.exports.clone());
 
                 // Send labels as JSON if any
@@ -260,11 +531,15 @@ fn process_lua_files(
                     }
                 }
             }
-            Err(e) => error!("Lua error: {}", e),
+            Err(e) => error!("Project processing error: {}", e),
         }
 
+        let Some(content) = lua_content.as_deref() else {
+            continue;
+        };
+
         // Try to compute magnetic field if this looks like a Helmholtz coil
-        if let Some(field_data) = try_compute_helmholtz_field(&lua, &content) {
+        if let Some(field_data) = try_compute_helmholtz_field(&lua, content) {
             let field_binary = field_data.to_binary();
             info!(
                 "Generated field: {}x{} slice, {} arrows, {} line points, {} bytes",
@@ -274,11 +549,11 @@ fn process_lua_files(
                 field_data.line_z.len(),
                 field_binary.len()
             );
-            let _ = tx.send(field_binary);
+            let _ = tx.send(packet_from_vec(field_binary));
         }
 
         // Try to compute acoustic field if this looks like an acoustic simulation
-        if let Some(field_data) = try_compute_acoustic_field(&lua, &content) {
+        if let Some(field_data) = try_compute_acoustic_field(&lua, content) {
             let field_binary = field_data.to_binary();
             info!(
                 "Generated acoustic field: {}x{} slice, {} bytes",
@@ -286,11 +561,11 @@ fn process_lua_files(
                 field_data.slice_height,
                 field_binary.len()
             );
-            let _ = tx.send(field_binary);
+            let _ = tx.send(packet_from_vec(field_binary));
         }
 
         // Try to generate circuit diagram if this looks like a circuit definition
-        if let Some(circuit_data) = try_generate_circuit(&lua, &content) {
+        if let Some(circuit_data) = try_generate_circuit(&lua, content) {
             let circuit_binary = circuit_data.to_binary();
             info!(
                 "Generated circuit: {}x{}, {} bytes SVG",
@@ -298,25 +573,25 @@ fn process_lua_files(
                 circuit_data.height,
                 circuit_data.svg.len()
             );
-            let _ = tx.send(circuit_binary);
+            let _ = tx.send(packet_from_vec(circuit_binary));
         }
 
         // Compute GaussMeter point measurements
-        let gaussmeter_measurements = try_compute_gaussmeter_measurements(&lua, &content);
+        let gaussmeter_measurements = try_compute_gaussmeter_measurements(&lua, content);
         for m in &gaussmeter_measurements {
             let binary = m.to_binary();
-            let _ = tx.send(binary);
+            let _ = tx.send(packet_from_vec(binary));
         }
 
         // Compute Probe line measurements
-        let probe_measurements = try_compute_probe_measurements(&lua, &content);
+        let probe_measurements = try_compute_probe_measurements(&lua, content);
         for m in &probe_measurements {
             let binary = m.to_binary();
-            let _ = tx.send(binary);
+            let _ = tx.send(packet_from_vec(binary));
         }
 
         // Compute Hydrophone point measurements and send to renderer
-        let hydrophone_measurements = try_compute_hydrophone_measurements(&lua, &content);
+        let hydrophone_measurements = try_compute_hydrophone_measurements(&lua, content);
         for (x, y, z, magnitude, label) in &hydrophone_measurements {
             info!(
                 "Hydrophone measurement '{}': position=({:.1}, {:.1}, {:.1}), magnitude={:.6}",
@@ -330,18 +605,18 @@ fn process_lua_files(
                 label: label.clone(),
             };
             let binary = measurement.to_binary();
-            let _ = tx.send(binary);
+            let _ = tx.send(packet_from_vec(binary));
         }
 
         // Compute NanoVNA frequency sweep if configured
-        if let Some(sweep) = try_compute_nanovna_sweep(&lua, &content) {
+        if let Some(sweep) = try_compute_nanovna_sweep(&lua, content) {
             let sweep_binary = sweep.to_binary();
             info!(
                 "Generated NanoVNA sweep: {} points, {} bytes",
                 sweep.points.len(),
                 sweep_binary.len()
             );
-            let _ = tx.send(sweep_binary);
+            let _ = tx.send(packet_from_vec(sweep_binary));
         }
     }
 }
@@ -1203,7 +1478,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
     Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels, exports })
 }
 
-async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>) {
+async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<PathBuf>) {
     let (notify_tx, mut notify_rx) = mpsc::channel::<PathBuf>(10);
 
     let mut debouncer = new_debouncer(Duration::from_millis(200), move |res: DebounceEventResult| {
@@ -1222,10 +1497,8 @@ async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<(String, PathBuf)>)
 
     while let Some(changed) = notify_rx.recv().await {
         if changed == path || changed.file_name() == path.file_name() {
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                info!("File changed, regenerating mesh...");
-                let _ = tx.send((content, path.clone()));
-            }
+            info!("File changed, regenerating mesh...");
+            let _ = tx.send(path.clone());
         }
     }
 }
@@ -1243,7 +1516,8 @@ fn collect_export_stl_files(watched_file: &str, exports: &[String]) -> Vec<PathB
 
     let mut files = Vec::new();
     for rel in exports {
-        if !rel.to_ascii_lowercase().ends_with(".stl") {
+        let lower = rel.to_ascii_lowercase();
+        if !(lower.ends_with(".stl") || lower.ends_with(".step") || lower.ends_with(".stp")) {
             continue;
         }
         let candidate = base_dir.join(&rel);
@@ -1320,24 +1594,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     });
     let _ = sender.send(Message::Text(info_json.to_string())).await;
 
+    // Send current view config if available
+    if let Some(view) = state.current_view.read().await.clone() {
+        let _ = sender.send(Message::Binary(view.as_ref().to_vec())).await;
+    }
+
     // Send current mesh if available
     if let Some(mesh) = state.current_mesh.read().await.clone() {
-        let _ = sender.send(Message::Binary(mesh.into())).await;
+        let _ = sender.send(Message::Binary(mesh.as_ref().to_vec())).await;
     }
 
     // Send current field if available
     if let Some(field) = state.current_field.read().await.clone() {
-        let _ = sender.send(Message::Binary(field.into())).await;
+        let _ = sender.send(Message::Binary(field.as_ref().to_vec())).await;
     }
 
     // Send current circuit if available
     if let Some(circuit) = state.current_circuit.read().await.clone() {
-        let _ = sender.send(Message::Binary(circuit.into())).await;
+        let _ = sender.send(Message::Binary(circuit.as_ref().to_vec())).await;
     }
 
     // Send current NanoVNA if available
     if let Some(nanovna) = state.current_nanovna.read().await.clone() {
-        let _ = sender.send(Message::Binary(nanovna.into())).await;
+        let _ = sender.send(Message::Binary(nanovna.as_ref().to_vec())).await;
     }
 
     // Send current labels if available
@@ -1348,7 +1627,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     loop {
         tokio::select! {
             Ok(mesh) = rx.recv() => {
-                if sender.send(Message::Binary(mesh.into())).await.is_err() {
+                if sender.send(Message::Binary(mesh.as_ref().to_vec())).await.is_err() {
                     break;
                 }
             }

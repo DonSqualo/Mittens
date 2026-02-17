@@ -5,8 +5,9 @@ edition = "2021"
 description = "Development server for Mittens CAD with file watching and Lua execution"
 
 [features]
-default = ["manifold-support"]
+default = ["manifold-support", "occt-support"]
 manifold-support = ["dep:manifold3d"]
+occt-support = ["dep:opencascade", "dep:opencascade-sys"]
 
 [dependencies]
 # Web server
@@ -35,9 +36,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 clap = { version = "4.4", features = ["derive"] }
 chrono = "0.4"
+cxx = "1.0"
+glam = "0.23"
 
 # CSG geometry
 manifold3d = { version = "0.0.6", optional = true }
+opencascade = { version = "0.2.0", optional = true }
+opencascade-sys = { version = "0.2.0", optional = true }
+stl_io = "0.10.0"
 
 # 3MF export (ZIP with XML)
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
@@ -45,3 +51,13 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 [profile.release]
 lto = true
 codegen-units = 1
+
+[profile.dev]
+# Keep dev links lightweight; OCCT + Manifold can otherwise create extremely large
+# debug links that are prone to OOM / linker crashes on some systems.
+debug = 0
+
+[patch.crates-io]
+occt-sys = { path = "vendor/occt-sys" }
+opencascade-sys = { path = "vendor/opencascade-sys" }
+opencascade = { path = "vendor/opencascade" }

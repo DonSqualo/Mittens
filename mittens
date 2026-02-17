@@ -14,6 +14,17 @@ DEFAULT_ROUTER_LOG="$DEFAULT_RUNTIME_DIR/router.log"
 DEFAULT_ROUTER_PID_FILE="$DEFAULT_RUNTIME_DIR/router.pid"
 DEFAULT_PROJECTS_ROOT="${MITTENS_PROJECTS_ROOT:-${HOME:-/tmp}/projects}"
 DEFAULT_SYSTEMD_USER_DIR="${HOME:-/tmp}/.config/systemd/user"
+DEFAULT_CARGO_TARGET_DIR="${MITTENS_CARGO_TARGET_DIR:-${HOME:-/tmp}/.mittens/cargo-target}"
+
+cargo_target_dir() {
+  echo "$DEFAULT_CARGO_TARGET_DIR"
+}
+
+ensure_cargo_target_dir() {
+  local dir
+  dir="$(cargo_target_dir)"
+  mkdir -p "$dir"
+}
 
 usage() {
   cat <<'EOF'
@@ -63,24 +74,54 @@ ensure_registry_parent_dir() {
 }
 
 ensure_registry_bin() {
-  (cd "$SERVER_DIR" && cargo build --quiet --no-default-features --bin backend_registry)
+  local bin_path
+  bin_path="$(registry_bin_path)"
+  if [[ -x "$bin_path" ]]; then
+    return
+  fi
+  ensure_cargo_target_dir
+  (cd "$SERVER_DIR" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet --no-default-features --bin backend_registry)
 }
 
 ensure_router_bin() {
-  (cd "$SERVER_DIR" && cargo build --quiet --no-default-features --bin router_service)
+  local bin_path
+  bin_path="$(router_bin_path)"
+  if [[ -x "$bin_path" ]]; then
+    return
+  fi
+  ensure_cargo_target_dir
+  (cd "$SERVER_DIR" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet --no-default-features --bin router_service)
 }
 
 ensure_backend_bin_for_worktree() {
   local worktree="$1"
-  (cd "$worktree/server" && cargo build --quiet --release --bin mittens-server)
+  local server_bin_path mesher_bin_path
+  server_bin_path="$(backend_bin_path)"
+  mesher_bin_path="$(step_mesher_bin_path)"
+  if [[ "${MITTENS_FORCE_BUILD:-}" != "1" ]]; then
+    if [[ -x "$server_bin_path" && -x "$mesher_bin_path" ]]; then
+      return
+    fi
+  fi
+  ensure_cargo_target_dir
+  (cd "$worktree/server" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet --release --bin mittens-server --bin step_mesher)
 }
 
 registry_bin_path() {
-  echo "$SERVER_DIR/target/debug/backend_registry"
+  echo "$(cargo_target_dir)/debug/backend_registry"
 }
 
 router_bin_path() {
-  echo "$SERVER_DIR/target/debug/router_service"
+  echo "$(cargo_target_dir)/debug/router_service"
+}
+
+backend_bin_path() {
+  # Note: shared across worktrees when using a shared cargo target dir.
+  echo "$(cargo_target_dir)/release/mittens-server"
+}
+
+step_mesher_bin_path() {
+  echo "$(cargo_target_dir)/release/step_mesher"
 }
 
 registry_cmd_with_build() {
@@ -177,7 +218,10 @@ resolve_project_file() {
   [[ -n "$candidate_abs" ]] || die "project file not found: $candidate"
   [[ -f "$candidate_abs" ]] || die "project path is not a file: $candidate_abs"
   [[ -r "$candidate_abs" ]] || die "project file is not readable: $candidate_abs"
-  [[ "$candidate_abs" == *.lua ]] || die "project file must end with .lua: $candidate_abs"
+  case "$candidate_abs" in
+    *.lua|*.stl|*.step|*.stp) ;;
+    *) die "project file must end with .lua/.stl/.step/.stp: $candidate_abs" ;;
+  esac
 
   case "$candidate_abs" in
     "$projects_root_abs"/*) ;;
@@ -205,6 +249,9 @@ default_backend_id_from_project() {
   local base
   base="$(basename "$project_file")"
   base="${base%.lua}"
+  base="${base%.stl}"
+  base="${base%.step}"
+  base="${base%.stp}"
   sanitize_unit_id "$base"
 }
 
@@ -212,13 +259,19 @@ manifold_runtime_lib_dir() {
   echo "$DEFAULT_RUNTIME_DIR/lib/manifold"
 }
 
+occt_runtime_lib_dir() {
+  echo "$DEFAULT_RUNTIME_DIR/lib/occt"
+}
+
+backend_runtime_lib_dir_list() {
+  echo "$(manifold_runtime_lib_dir):$(occt_runtime_lib_dir)"
+}
+
 backend_ld_library_path() {
-  local lib_dir
-  lib_dir="$(manifold_runtime_lib_dir)"
   if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-    echo "${lib_dir}:${LD_LIBRARY_PATH}"
+    echo "$(backend_runtime_lib_dir_list):${LD_LIBRARY_PATH}"
   else
-    echo "${lib_dir}"
+    echo "$(backend_runtime_lib_dir_list)"
   fi
 }
 
@@ -227,6 +280,13 @@ sync_manifold_runtime_libs_for_worktree() {
   local lib_dir
   lib_dir="$(manifold_runtime_lib_dir)"
   mkdir -p "$lib_dir"
+
+  local build_root
+  build_root="$(cargo_target_dir)/release/build"
+  if [[ ! -d "$build_root" ]]; then
+    # Backward compatibility for older layouts.
+    build_root="$worktree/server/target/release/build"
+  fi
 
   local copied=0
   while IFS= read -r -d '' lib; do
@@ -240,9 +300,23 @@ sync_manifold_runtime_libs_for_worktree() {
       ln -sfn "$base.$major" "$lib_dir/$base"
     fi
     copied=1
-  done < <(find "$worktree/server/target/release/build" -type f \( -name 'libmanifold*.so*' -o -name 'libc++*.so*' -o -name 'libc++abi*.so*' \) -print0 2>/dev/null || true)
+  done < <(find "$build_root" -type f \( -name 'libmanifold*.so*' -o -name 'libc++*.so*' -o -name 'libc++abi*.so*' \) -print0 2>/dev/null || true)
 
-  [[ "$copied" == "1" ]] || die "failed to locate manifold runtime .so files under $worktree/server/target/release/build"
+  [[ "$copied" == "1" ]] || die "failed to locate manifold runtime .so files under $build_root"
+}
+
+sync_occt_runtime_libs_for_worktree() {
+  local _worktree="$1"
+  local lib_dir
+  lib_dir="$(occt_runtime_lib_dir)"
+  mkdir -p "$lib_dir"
+
+  local source_dir
+  source_dir="$(find "$(cargo_target_dir)/release/build" -type d -path '*occt-sys-*/out/build/lin64/*/lib' 2>/dev/null | head -n 1 || true)"
+  [[ -n "$source_dir" ]] || die "failed to locate OCCT runtime libs under $(cargo_target_dir)/release/build"
+
+  # Copy symlinks + versioned .so files.
+  cp -a "$source_dir/"*.so* "$lib_dir/" 2>/dev/null || die "failed to copy OCCT libs from $source_dir to $lib_dir"
 }
 
 set_backend_unit_ld_library_path() {
@@ -252,7 +326,7 @@ set_backend_unit_ld_library_path() {
   [[ -f "$unit_path" ]] || die "backend unit file not found: $unit_path"
 
   local ld_path
-  ld_path="$(manifold_runtime_lib_dir)"
+  ld_path="$(backend_runtime_lib_dir_list)"
 
   if grep -q '^Environment=LD_LIBRARY_PATH=' "$unit_path"; then
     sed -i "s|^Environment=LD_LIBRARY_PATH=.*|Environment=LD_LIBRARY_PATH=$ld_path|" "$unit_path"
@@ -659,9 +733,11 @@ run_backend_foreground() {
   ensure_registry_parent_dir "$registry_path"
 
   local ws_url="ws://127.0.0.1:${backend_port}/ws"
-  local backend_bin="$worktree/server/target/release/mittens-server"
+  local backend_bin
+  backend_bin="$(backend_bin_path)"
   [[ -x "$backend_bin" ]] || die "backend binary not found at $backend_bin (run backend install/start first)"
   sync_manifold_runtime_libs_for_worktree "$worktree"
+  sync_occt_runtime_libs_for_worktree "$worktree"
   local backend_ld_path
   backend_ld_path="$(backend_ld_library_path)"
   local registry_bin
@@ -934,6 +1010,7 @@ systemd_backend_install() {
   ensure_registry_parent_dir "$registry_path"
   ensure_backend_bin_for_worktree "$worktree"
   sync_manifold_runtime_libs_for_worktree "$worktree"
+  sync_occt_runtime_libs_for_worktree "$worktree"
   ensure_registry_bin
 
   local unit_name

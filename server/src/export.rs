@@ -244,7 +244,7 @@ pub fn process_exports_from_table(
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
-    let mut stl_outputs: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
 
     for pair in exports.pairs::<i32, mlua::Table>() {
         if let Ok((_, exp)) = pair {
@@ -284,9 +284,9 @@ pub fn process_exports_from_table(
                                 tracing::error!("STL export failed for {}: {}", filename, e);
                             } else {
                                 if let Ok(rel) = output_path.strip_prefix(base_dir) {
-                                    stl_outputs.push(rel.to_string_lossy().to_string());
+                                    outputs.push(rel.to_string_lossy().to_string());
                                 } else {
-                                    stl_outputs.push(
+                                    outputs.push(
                                         output_path
                                             .file_name()
                                             .map(|n| n.to_string_lossy().to_string())
@@ -325,7 +325,7 @@ pub fn process_exports_from_table(
             }
         }
     }
-    stl_outputs
+    outputs
 }
 
 fn versioned_stl_path(path: &Path) -> PathBuf {
