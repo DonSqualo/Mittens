@@ -1292,14 +1292,14 @@ ensure_port_available_for_unit() {
 
 unit_exists() {
   local unit="$1"
-  refresh_status_snapshot >/dev/null
+  refresh_status_snapshot force >/dev/null
   awk -F '\t' -v unit="$unit" '$2 == unit && $7 == "yes" { found=1 } END { exit(found ? 0 : 1) }' "$(status_snapshot_tsv_path)"
 }
 
 status_unit_for_kind_port() {
   local kind="$1"
   local port="$2"
-  refresh_status_snapshot >/dev/null
+  refresh_status_snapshot force >/dev/null
   awk -F '\t' -v k="$kind" -v p="$port" '$1 == k && $3 == p && $7 == "yes" { print $2; exit }' "$(status_snapshot_tsv_path)"
 }
 
@@ -1554,12 +1554,13 @@ write_status_snapshot_json() {
 }
 
 refresh_status_snapshot() {
+  local force="${1:-}"
   local tsv_path json_path
   tsv_path="$(status_snapshot_tsv_path)"
   json_path="$(status_snapshot_json_path)"
 
   # Avoid hammering systemd on /api/graph refresh loops.
-  if [[ -f "$json_path" ]]; then
+  if [[ "$force" != "force" && -f "$json_path" ]]; then
     local now_s snap_s age_s
     now_s="$(date +%s)"
     snap_s="$(stat -c %Y "$json_path" 2>/dev/null || echo 0)"
