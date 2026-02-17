@@ -15,9 +15,36 @@ DEFAULT_ROUTER_PID_FILE="$DEFAULT_RUNTIME_DIR/router.pid"
 DEFAULT_PROJECTS_ROOT="${MITTENS_PROJECTS_ROOT:-${HOME:-/tmp}/projects}"
 DEFAULT_SYSTEMD_USER_DIR="${HOME:-/tmp}/.config/systemd/user"
 DEFAULT_CARGO_TARGET_DIR="${MITTENS_CARGO_TARGET_DIR:-${HOME:-/tmp}/.mittens/cargo-target}"
+DEFAULT_STATUS_SNAPSHOT_TTL_SEC="${MITTENS_STATUS_SNAPSHOT_TTL_SEC:-1}"
 
 cargo_target_dir() {
   echo "$DEFAULT_CARGO_TARGET_DIR"
+}
+
+build_profile() {
+  # Dev should be fast by default. Use MITTENS_BUILD_PROFILE=release when you
+  # explicitly want optimized binaries.
+  echo "${MITTENS_BUILD_PROFILE:-debug}"
+}
+
+cargo_profile_flag() {
+  local profile
+  profile="$(build_profile)"
+  case "$profile" in
+    release) echo "--release" ;;
+    debug|dev|"") echo "" ;;
+    *) echo "--profile" "$profile" ;;
+  esac
+}
+
+cargo_profile_dir() {
+  local profile
+  profile="$(build_profile)"
+  case "$profile" in
+    release) echo "release" ;;
+    debug|dev|"") echo "debug" ;;
+    *) echo "$profile" ;;
+  esac
 }
 
 ensure_cargo_target_dir() {
@@ -76,8 +103,10 @@ ensure_registry_parent_dir() {
 ensure_registry_bin() {
   local bin_path
   bin_path="$(registry_bin_path)"
-  if [[ -x "$bin_path" ]]; then
-    return
+  if [[ "${MITTENS_FORCE_BUILD:-}" != "1" ]]; then
+    if [[ -x "$bin_path" ]]; then
+      return
+    fi
   fi
   ensure_cargo_target_dir
   (cd "$SERVER_DIR" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet --no-default-features --bin backend_registry)
@@ -86,8 +115,10 @@ ensure_registry_bin() {
 ensure_router_bin() {
   local bin_path
   bin_path="$(router_bin_path)"
-  if [[ -x "$bin_path" ]]; then
-    return
+  if [[ "${MITTENS_FORCE_BUILD:-}" != "1" ]]; then
+    if [[ -x "$bin_path" ]]; then
+      return
+    fi
   fi
   ensure_cargo_target_dir
   (cd "$SERVER_DIR" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet --no-default-features --bin router_service)
@@ -104,7 +135,10 @@ ensure_backend_bin_for_worktree() {
     fi
   fi
   ensure_cargo_target_dir
-  (cd "$worktree/server" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet --release --bin mittens-server --bin step_mesher)
+  # Default to a fast dev build. Override with MITTENS_BUILD_PROFILE=release.
+  local profile_flag=()
+  read -r -a profile_flag <<<"$(cargo_profile_flag)"
+  (cd "$worktree/server" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet "${profile_flag[@]}" --bin mittens-server --bin step_mesher)
 }
 
 registry_bin_path() {
@@ -117,11 +151,11 @@ router_bin_path() {
 
 backend_bin_path() {
   # Note: shared across worktrees when using a shared cargo target dir.
-  echo "$(cargo_target_dir)/release/mittens-server"
+  echo "$(cargo_target_dir)/$(cargo_profile_dir)/mittens-server"
 }
 
 step_mesher_bin_path() {
-  echo "$(cargo_target_dir)/release/step_mesher"
+  echo "$(cargo_target_dir)/$(cargo_profile_dir)/step_mesher"
 }
 
 registry_cmd_with_build() {
@@ -737,6 +771,7 @@ run_router_foreground() {
   router_port="$(get_flag flags --port "$DEFAULT_ROUTER_PORT")"
 
   ensure_registry_parent_dir "$registry_path"
+  ensure_router_bin
   local router_bin
   router_bin="$(router_bin_path)"
   [[ -x "$router_bin" ]] || die "router_service binary not found at $router_bin (run router install/start first)"
@@ -770,6 +805,7 @@ run_backend_foreground() {
   fi
 
   ensure_registry_parent_dir "$registry_path"
+  ensure_backend_bin_for_worktree "$worktree"
 
   local ws_url="ws://127.0.0.1:${backend_port}/ws"
   local backend_bin
@@ -1521,24 +1557,115 @@ refresh_status_snapshot() {
   local tsv_path json_path
   tsv_path="$(status_snapshot_tsv_path)"
   json_path="$(status_snapshot_json_path)"
+
+  # Avoid hammering systemd on /api/graph refresh loops.
+  if [[ -f "$json_path" ]]; then
+    local now_s snap_s age_s
+    now_s="$(date +%s)"
+    snap_s="$(stat -c %Y "$json_path" 2>/dev/null || echo 0)"
+    age_s="$(( now_s - snap_s ))"
+    if [[ "$age_s" -ge 0 ]] && [[ "$age_s" -lt "$DEFAULT_STATUS_SNAPSHOT_TTL_SEC" ]]; then
+      return
+    fi
+  fi
+
+  mapfile -t units < <(discover_status_units | awk '{gsub(/\r/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); if ($0 != "") print $0}' | sort -u)
   : >"$tsv_path"
-  while IFS= read -r unit; do
+  if [[ "${#units[@]}" -eq 0 ]]; then
+    write_status_snapshot_json "$tsv_path" "$json_path"
+    return
+  fi
+
+  # Build a quick "exists" set from list-unit-files (one call) plus unit files on disk.
+  local unitfiles_tmp
+  unitfiles_tmp="$(mktemp)"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' >"$unitfiles_tmp" || true
+  else
+    : >"$unitfiles_tmp"
+  fi
+
+  # Collect listening ports/processes in one pass.
+  declare -A ss_listen ss_process
+  if command -v ss >/dev/null 2>&1; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      local_addr="$(awk '{print $4}' <<<"$line")"
+      port="${local_addr##*:}"
+      if [[ "$local_addr" == *"]:"* ]]; then
+        port="${local_addr##*]:}"
+      fi
+      [[ -n "$port" ]] || continue
+      ss_listen["$port"]="yes"
+      proc="$(sed -n 's/.*users:(\\(.*\\)).*/\\1/p' <<<"$line")"
+      [[ -n "$proc" ]] || proc="-"
+      ss_process["$port"]="$proc"
+    done < <(ss -ltnpH 2>/dev/null || true)
+  fi
+
+  # Batch systemctl show for all units (one call). Parse into associative arrays keyed by Id.
+  declare -A s_active s_sub s_exec
+  if command -v systemctl >/dev/null 2>&1; then
+    cur_id=""
+    while IFS= read -r line; do
+      if [[ -z "$line" ]]; then
+        cur_id=""
+        continue
+      fi
+      case "$line" in
+        Id=*)
+          cur_id="${line#Id=}"
+          ;;
+        ActiveState=*)
+          [[ -n "$cur_id" ]] && s_active["$cur_id"]="${line#ActiveState=}"
+          ;;
+        SubState=*)
+          [[ -n "$cur_id" ]] && s_sub["$cur_id"]="${line#SubState=}"
+          ;;
+        ExecStart=*)
+          [[ -n "$cur_id" ]] && s_exec["$cur_id"]="${line#ExecStart=}"
+          ;;
+      esac
+    done < <(systemctl --user show "${units[@]}" --no-page \
+      --property=Id --property=ActiveState --property=SubState --property=ExecStart 2>/dev/null || true)
+  fi
+
+  for unit in "${units[@]}"; do
     [[ -n "$unit" ]] || continue
-    local kind exists port state listen_process listen process
     kind="$(unit_kind "$unit")"
     [[ "$kind" == "unknown" ]] && continue
-    if unit_exists_in_system "$unit"; then
+
+    exists="no"
+    if grep -qx "$unit" "$unitfiles_tmp" 2>/dev/null; then
       exists="yes"
-    else
-      exists="no"
+    elif [[ -f "$DEFAULT_SYSTEMD_USER_DIR/$unit" ]]; then
+      exists="yes"
     fi
-    port="$(unit_port "$unit")"
-    state="$(unit_state "$unit")"
-    listen_process="$(port_listen_and_process "$port")"
-    listen="${listen_process%%$'\t'*}"
-    process="${listen_process#*$'\t'}"
+
+    active="${s_active[$unit]:-unknown}"
+    sub="${s_sub[$unit]:-unknown}"
+    state="${active}/${sub}"
+
+    exec="${s_exec[$unit]:-}"
+    port="$(printf "%s" "$exec" | sed -n 's/.* --port \\([0-9][0-9]*\\).*/\\1/p' | head -n1)"
+    if [[ -z "$port" && -f "$DEFAULT_SYSTEMD_USER_DIR/$unit" ]]; then
+      port="$(sed -n 's/.* --port \\([0-9][0-9]*\\).*/\\1/p' "$DEFAULT_SYSTEMD_USER_DIR/$unit" | head -n1)"
+    fi
+    if [[ -z "$port" ]]; then
+      port="$(port_from_registry_for_backend_unit "$unit" || true)"
+    fi
+    if [[ -z "$port" && "$unit" == "mittens-router.service" ]]; then
+      port="$DEFAULT_ROUTER_PORT"
+    fi
+    [[ -n "$port" ]] || port="-"
+
+    listen="${ss_listen[$port]:-no}"
+    process="${ss_process[$port]:--}"
+
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$kind" "$unit" "$port" "$state" "$listen" "$process" "$exists" >>"$tsv_path"
-  done < <(discover_status_units | awk '{gsub(/\r/, "", $0); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); if ($0 != "") print $0}' | sort -u)
+  done
+
+  rm -f "$unitfiles_tmp"
   sort -u "$tsv_path" -o "$tsv_path"
   write_status_snapshot_json "$tsv_path" "$json_path"
 }

@@ -16,7 +16,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
-use std::{io::Write, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{io::Write, net::SocketAddr, path::PathBuf, sync::Arc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
@@ -78,6 +78,96 @@ fn default_step_deflection_for_path(path: &PathBuf) -> f64 {
     } else {
         0.05
     }
+}
+
+fn step_mesh_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(dir).join("mittens").join("step_mesh");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join("mittens")
+            .join("step_mesh");
+    }
+    std::env::temp_dir().join("mittens_step_mesh_cache")
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn step_mesh_cache_key(input: &PathBuf, deflection: f64) -> Result<String> {
+    let canon = std::fs::canonicalize(input).unwrap_or_else(|_| input.clone());
+    let meta = std::fs::metadata(&canon)
+        .with_context(|| format!("failed to stat STEP {}", canon.display()))?;
+    let len = meta.len();
+    let mtime_ns: u128 = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // Stable key across runs (no randomized hasher).
+    let s = format!(
+        "{}|{}|{}|{:.9}",
+        canon.display(),
+        len,
+        mtime_ns,
+        deflection
+    );
+    Ok(format!("{:016x}", fnv1a64(s.as_bytes())))
+}
+
+fn step_mesh_cache_path(input: &PathBuf, deflection: f64) -> Result<PathBuf> {
+    let key = step_mesh_cache_key(input, deflection)?;
+    Ok(step_mesh_cache_dir().join(format!("stepmesh_{}.bin", key)))
+}
+
+fn parse_mesh_stats(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let nv = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let ni = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    Some((nv, ni))
+}
+
+fn mesh_step_cached_or_run(input: &PathBuf, deflection: f64) -> Result<(Vec<u8>, bool)> {
+    let cache_path = step_mesh_cache_path(input, deflection)?;
+    if let Ok(bytes) = std::fs::read(&cache_path) {
+        // Minimal sanity check: [u32 num_vertices][u32 num_indices]
+        if parse_mesh_stats(&bytes).is_some() {
+            return Ok((bytes, true));
+        }
+    }
+
+    let bytes = mesh_step_via_subprocess(input, deflection)?;
+
+    if parse_mesh_stats(&bytes).is_some() {
+        let dir = step_mesh_cache_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let tmp = dir.join(format!(
+            ".tmp_stepmesh_{}_{}.bin",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &cache_path);
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    Ok((bytes, false))
 }
 
 fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>> {
@@ -439,13 +529,25 @@ fn process_project_files(
                     })
                     .to_string(),
                 );
-                match mesh_step_via_subprocess(&file_path, deflection_coarse) {
-                    Ok(mesh_binary) => {
+                match mesh_step_cached_or_run(&file_path, deflection_coarse) {
+                    Ok((mesh_binary, cache_hit)) => {
                         info!(
                             "STEP coarse mesh packet: {} bytes (deflection={})",
                             mesh_binary.len(),
                             deflection_coarse
                         );
+                        if let Some((nv, ni)) = parse_mesh_stats(&mesh_binary) {
+                            let tris = (ni / 3) as u64;
+                            let mb = (mesh_binary.len() as f64) / (1024.0 * 1024.0);
+                            let _ = labels_tx.send(
+                                serde_json::json!({
+                                    "type": "status",
+                                    "state": "meshing",
+                                    "detail": format!("STEP coarse mesh {} ({} verts, {} tris, {:.1} MiB)", if cache_hit { "cache hit" } else { "built" }, nv, tris, mb),
+                                })
+                                .to_string(),
+                            );
+                        }
                         let _ = tx.send(packet_from_vec(mesh_binary));
                         let _ = exports_tx.send(vec![file_name.clone()]);
                         let _ = scene_tx.send(None);
@@ -482,13 +584,25 @@ fn process_project_files(
                         })
                         .to_string(),
                     );
-                    match mesh_step_via_subprocess(&file_path, deflection_fine) {
-                        Ok(mesh_binary) => {
+                    match mesh_step_cached_or_run(&file_path, deflection_fine) {
+                        Ok((mesh_binary, cache_hit)) => {
                             info!(
                                 "STEP refined mesh packet: {} bytes (deflection={})",
                                 mesh_binary.len(),
                                 deflection_fine
                             );
+                            if let Some((nv, ni)) = parse_mesh_stats(&mesh_binary) {
+                                let tris = (ni / 3) as u64;
+                                let mb = (mesh_binary.len() as f64) / (1024.0 * 1024.0);
+                                let _ = labels_tx.send(
+                                    serde_json::json!({
+                                        "type": "status",
+                                        "state": "meshing",
+                                        "detail": format!("STEP refined mesh {} ({} verts, {} tris, {:.1} MiB)", if cache_hit { "cache hit" } else { "built" }, nv, tris, mb),
+                                    })
+                                    .to_string(),
+                                );
+                            }
                             let _ = tx.send(packet_from_vec(mesh_binary));
                             let _ = exports_tx.send(vec![file_name]);
                             let _ = scene_tx.send(None);

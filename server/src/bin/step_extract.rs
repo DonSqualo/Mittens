@@ -129,7 +129,21 @@ fn export_solid_by_index(root: &ffi::TopoDS_Shape, idx: usize, out_path: &Path) 
     while explorer.More() {
         if cur_idx == idx {
             let cur = explorer.Current();
-            write_step(cur, out_path)?;
+            // Translate the solid so its center-of-mass is near the origin. This makes the
+            // viewer's auto-frame and orbit controls behave predictably.
+            let info = solid_info_for(cur, cur_idx)?;
+            let mut trsf = ffi::new_transform();
+            let v = ffi::new_vec(-info.com.0, -info.com.1, -info.com.2);
+            trsf.pin_mut().set_translation_vec(&v);
+
+            let mut xform = ffi::BRepBuilderAPI_Transform_ctor(cur, &trsf, false);
+            let progress = ffi::Message_ProgressRange_ctor();
+            xform.pin_mut().Build(&progress);
+            if !xform.IsDone() {
+                bail!("OCCT transform failed while centering solid {}", idx);
+            }
+
+            write_step(xform.pin_mut().Shape(), out_path)?;
             return Ok(());
         }
         cur_idx += 1;
