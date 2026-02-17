@@ -554,9 +554,9 @@ fn process_project_files(
 
                 // Keep STEP meshing out-of-process; OCCT can OOM/abort on large assemblies.
                 // View config first so the renderer can get into a known state immediately.
-                // STEP meshes (especially thin plates) can be nearly invisible with the x-ray shader
-                // when triangles are coarse. Default to showing edges.
-                let view_binary = serialize_view_config(false, true, None);
+                // Default to edges off: edge overlay is expensive on very large assemblies.
+                // We'll enable edges later for very small meshes (thin plates etc).
+                let view_binary = serialize_view_config(false, false, None);
                 let _ = tx.send(packet_from_vec(view_binary));
 
                 let deflection_fine = std::env::var("MITTENS_STEP_DEFLECTION")
@@ -577,11 +577,24 @@ fn process_project_files(
                     .unwrap_or(false);
 
                 // First pass: coarse mesh for quick interactivity.
+                // Emit a "cache hit" hint early so the user sees that we're not remeshing.
+                let coarse_cache_hit_hint = step_mesh_cache_path(&file_path, deflection_coarse)
+                    .ok()
+                    .and_then(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())));
+                let coarse_hint = if let Some((_p, len)) = coarse_cache_hit_hint {
+                    format!(
+                        "STEP coarse mesh cache hit (deflection={}) {:.1} MiB",
+                        deflection_coarse,
+                        (len as f64) / (1024.0 * 1024.0)
+                    )
+                } else {
+                    format!("STEP meshing (coarse deflection={})", deflection_coarse)
+                };
                 let _ = labels_tx.send(
                     serde_json::json!({
                         "type": "status",
                         "state": "meshing",
-                        "detail": format!("STEP meshing (coarse deflection={})", deflection_coarse),
+                        "detail": coarse_hint,
                     })
                     .to_string(),
                 );
@@ -603,6 +616,12 @@ fn process_project_files(
                                 })
                                 .to_string(),
                             );
+
+                            // Enable edges for small meshes; it helps thin plates show up, but is
+                            // too expensive for large assemblies.
+                            let show_edges = tris <= 20_000;
+                            let view_binary = serialize_view_config(false, show_edges, None);
+                            let _ = tx.send(packet_from_vec(view_binary));
                         }
                         let _ = tx.send(packet_from_vec(mesh_binary));
                         let _ = exports_tx.send(vec![file_name.clone()]);
@@ -658,6 +677,10 @@ fn process_project_files(
                                     })
                                     .to_string(),
                                 );
+
+                                let show_edges = tris <= 20_000;
+                                let view_binary = serialize_view_config(false, show_edges, None);
+                                let _ = tx.send(packet_from_vec(view_binary));
                             }
                             let _ = tx.send(packet_from_vec(mesh_binary));
                             let _ = exports_tx.send(vec![file_name]);

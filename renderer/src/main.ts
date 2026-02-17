@@ -11,6 +11,7 @@ const initial_query = new URLSearchParams(window.location.search);
 const current_backend_id = initial_query.get('backend_id') || '';
 const CAMERA_STORAGE_KEY = current_backend_id ? `mittens_camera:${current_backend_id}` : 'mittens_camera';
 const DEBUG_WS = initial_query.get('debug') === '1' || localStorage.getItem('mittens_debug') === '1';
+const RESET_CAMERA = initial_query.get('reset_camera') === '1' || initial_query.get('clear_camera') === '1';
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -37,6 +38,9 @@ controls.dampingFactor = 0.05;
 controls.target.copy(DEFAULT_CAMERA.target);
 
 // Restore camera from localStorage (survives page reloads)
+if (RESET_CAMERA) {
+  localStorage.removeItem(CAMERA_STORAGE_KEY);
+}
 const saved_camera = localStorage.getItem(CAMERA_STORAGE_KEY);
 if (saved_camera) {
   try {
