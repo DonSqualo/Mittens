@@ -97,6 +97,7 @@ let current_ws: WebSocket | null = null;
 let current_export_files: string[] = [];
 
 let did_auto_frame = false;
+let last_backend_id_for_autoframe: string | null = null;
 
 // Loading bar (bottom)
 const loading_bar_el = document.getElementById('loading-bar') as HTMLDivElement | null;
@@ -1505,6 +1506,16 @@ function connect_websocket() {
   if (DEBUG_WS) {
     console.log(`[ws] connecting backend_id='${backend_id}' renderer_id='${configured_renderer_id || ''}' path='${ws_path}'`);
   }
+
+  // Auto-frame is a per-backend concern. If the user switches backends within the same
+  // page session, we should still frame the new model once (unless there's a saved camera).
+  if (last_backend_id_for_autoframe !== backend_id) {
+    did_auto_frame = false;
+    home_camera = null;
+    last_lua_camera_key = '';
+    last_backend_id_for_autoframe = backend_id;
+  }
+
   const ws = new WebSocket(`${ws_scheme}://${window.location.host}${ws_path}`);
   current_ws = ws;
   ws.binaryType = 'arraybuffer';
