@@ -1438,6 +1438,7 @@ const status_detail_el = document.getElementById('status-detail')!;
 let last_update_time: Date | null = null;
 let last_edge_count = 0;
 let last_render_ms = 0;
+let status_detail_override: { text: string; until_ms: number } | null = null;
 
 // Server info (file, branch, port)
 let server_info: { file: string; branch: string; port: number } | null = null;
@@ -1469,14 +1470,20 @@ function format_time(date: Date): string {
 }
 
 function update_status_display() {
+  const now_ms = Date.now();
+  const override_active = status_detail_override && status_detail_override.until_ms > now_ms;
   if (last_update_time && server_info) {
     const filename = server_info.file.split('/').pop() || server_info.file;
     status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()} · ${format_time(last_update_time)}`;
     status_el.style.color = '#0f0';
-    status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
+    status_detail_el.textContent = override_active
+      ? status_detail_override!.text
+      : `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
   } else if (last_update_time) {
     status_el.textContent = `Updated ${format_time(last_update_time)}`;
-    status_detail_el.textContent = `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
+    status_detail_el.textContent = override_active
+      ? status_detail_override!.text
+      : `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
   }
 }
 
@@ -1492,6 +1499,10 @@ function update_status(state: 'connecting' | 'connected' | 'disconnected' | 'err
     const filename = server_info.file.split('/').pop() || server_info.file;
     status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()}`;
     status_el.style.color = '#0f0';
+    if (detail && detail.length > 0) {
+      // Keep it visible long enough that it's noticeable, even if a mesh arrives immediately.
+      status_detail_override = { text: detail, until_ms: Date.now() + 8000 };
+    }
   } else if (state !== 'connected' || !last_update_time) {
     status_el.textContent = `${icons[state]} ${state.toUpperCase()}`;
     status_el.style.color = '';  // Reset to default

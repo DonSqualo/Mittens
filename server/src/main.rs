@@ -618,11 +618,7 @@ fn process_project_files(
                                 .to_string(),
                             );
 
-                            // Enable edges for small meshes; it helps thin plates show up, but is
-                            // too expensive for large assemblies.
-                            let show_edges = tris <= 20_000;
-                            let view_binary = serialize_view_config(false, show_edges, None);
-                            let _ = tx.send(packet_from_vec(view_binary));
+                            let _ = tris; // keep for future heuristics
                         }
                         let _ = tx.send(packet_from_vec(mesh_binary));
                         let _ = exports_tx.send(vec![file_name.clone()]);
@@ -680,9 +676,7 @@ fn process_project_files(
                                     .to_string(),
                                 );
 
-                                let show_edges = tris <= 20_000;
-                                let view_binary = serialize_view_config(false, show_edges, None);
-                                let _ = tx.send(packet_from_vec(view_binary));
+                                let _ = tris; // keep for future heuristics
                             }
                             let _ = tx.send(packet_from_vec(mesh_binary));
                             let _ = exports_tx.send(vec![file_name]);
