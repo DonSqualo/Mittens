@@ -114,29 +114,43 @@ let current_export_files: string[] = [];
 let did_auto_frame = false;
 let last_backend_id_for_autoframe: string | null = null;
 
-// Loading bar (bottom)
+// Loading indicator (bottom strip + status-link highlight)
 const loading_bar_el = document.getElementById('loading-bar') as HTMLDivElement | null;
 const loading_text_el = document.getElementById('loading-bar-text') as HTMLDivElement | null;
 const loading_elapsed_el = document.getElementById('loading-bar-elapsed') as HTMLDivElement | null;
 let loading_since_ms: number | null = null;
 let loading_timer: number | null = null;
+let loading_state: 'idle' | 'waiting' | 'meshing' | 'downloading' | 'applying' | 'error' = 'idle';
 
-function set_loading_bar(state: 'idle' | 'meshing' | 'ready' | 'error', detail?: string) {
+function set_loading_bar(
+  state: 'idle' | 'waiting' | 'meshing' | 'downloading' | 'applying' | 'error',
+  detail?: string
+) {
   if (!loading_bar_el || !loading_text_el || !loading_elapsed_el) return;
 
-  if (state === 'idle' || state === 'ready') {
+  loading_state = state;
+
+  if (state === 'idle') {
     loading_bar_el.classList.remove('visible', 'state-error');
     loading_since_ms = null;
     if (loading_timer) {
       window.clearInterval(loading_timer);
       loading_timer = null;
     }
+    // Clear the "loading" emphasis on the bottom-left status widget.
+    const status_link = document.getElementById('status-link');
+    if (status_link) status_link.classList.remove('loading');
     return;
   }
 
   loading_bar_el.classList.add('visible');
   loading_bar_el.classList.toggle('state-error', state === 'error');
-  loading_text_el.textContent = detail || (state === 'meshing' ? 'Meshing...' : 'Error');
+  loading_text_el.textContent = detail
+    || (state === 'waiting' ? 'Waiting for model data...'
+      : state === 'meshing' ? 'Meshing STEP...'
+        : state === 'downloading' ? 'Receiving mesh...'
+          : state === 'applying' ? 'Applying mesh...'
+            : 'Error');
   if (loading_since_ms === null) loading_since_ms = Date.now();
 
   const updateElapsed = () => {
@@ -148,6 +162,10 @@ function set_loading_bar(state: 'idle' | 'meshing' | 'ready' | 'error', detail?:
   if (!loading_timer) {
     loading_timer = window.setInterval(updateElapsed, 250);
   }
+
+  // Make it obvious next to the green bottom-left text as well.
+  const status_link = document.getElementById('status-link');
+  if (status_link) status_link.classList.add('loading');
 }
 
 // Graph canvas (defined in HTML, hidden by default)
@@ -1318,8 +1336,9 @@ function update_mesh(buffer: ArrayBuffer) {
   const result = parse_binary_mesh(buffer);
   if (!result) return;
 
-  // We received a real mesh payload; dismiss the "meshing" strip if it was shown.
-  set_loading_bar('ready');
+  // We received a real mesh payload; the websocket handler will clear loading once applied.
+  // Keep this as a no-op in case update_mesh is called directly.
+  if (loading_state !== 'idle') set_loading_bar('idle');
 
   last_edge_count = result.edges;
   // Helpful when debugging "invisible" parts: log bbox + current camera.
@@ -1487,9 +1506,20 @@ function update_status_display() {
     const filename = server_info.file.split('/').pop() || server_info.file;
     status_el.textContent = `📁 ${filename} · 🌿 ${current_branch_label()} · ${format_time(last_update_time)}`;
     status_el.style.color = '#0f0';
-    status_detail_el.textContent = override_active
-      ? status_detail_override!.text
-      : `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
+    if (loading_state !== 'idle' && loading_since_ms !== null) {
+      const s = Math.max(0, Math.floor((Date.now() - loading_since_ms) / 1000));
+      const label = loading_state === 'meshing' ? 'MEShing'
+        : loading_state === 'downloading' ? 'RECEIVING'
+          : loading_state === 'applying' ? 'APPLYING'
+            : loading_state === 'waiting' ? 'WAITING'
+              : loading_state === 'error' ? 'ERROR'
+                : 'LOADING';
+      status_detail_el.textContent = `${label} ${s}s`;
+    } else {
+      status_detail_el.textContent = override_active
+        ? status_detail_override!.text
+        : `${last_edge_count.toLocaleString()} edges · ${last_render_ms.toFixed(1)}ms`;
+    }
   } else if (last_update_time) {
     status_el.textContent = `Updated ${format_time(last_update_time)}`;
     status_detail_el.textContent = override_active
@@ -1563,6 +1593,8 @@ function connect_websocket() {
   ws.onopen = () => {
     console.log('WebSocket connected');
     update_status('connected', 'Waiting for data...');
+    // If nothing renders, we still want a very obvious signal that we're waiting on the model.
+    set_loading_bar('waiting', 'Waiting for model data...');
     if (download_step_btn) download_step_btn.disabled = false;
   };
 
@@ -1583,11 +1615,14 @@ function connect_websocket() {
       const buf = pending_binary;
       pending_binary = null;
       if (!buf) return;
+      set_loading_bar('applying', `Applying mesh (${(buf.byteLength / (1024 * 1024)).toFixed(1)} MiB)...`);
       const start = performance.now();
       update_mesh(buf);
       last_render_ms = performance.now() - start;
       last_update_time = new Date();
       update_status_display();
+      // Mesh is in; remove loading indicator immediately so "still loading" vs "bugged" is clear.
+      set_loading_bar('idle');
       if (pending_binary) schedule_apply_binary();
     });
   };
@@ -1622,6 +1657,8 @@ function connect_websocket() {
         return;
       }
       if (try_handle_export_packet(event.data)) return;
+      // A real mesh payload is arriving; show it even if the server never sent "meshing".
+      set_loading_bar('downloading', `Receiving mesh (${(event.data.byteLength / (1024 * 1024)).toFixed(1)} MiB)...`);
       pending_binary = event.data;
       schedule_apply_binary();
     } else if (typeof event.data === 'string') {
@@ -1657,9 +1694,12 @@ function connect_websocket() {
           if (DEBUG_WS) console.log(`[status] ${state}${detail ? `: ${detail}` : ''}`);
           // Keep using the existing HUD; map custom status to a detail line.
           update_status('connected', detail || state);
-          if (state === 'meshing') set_loading_bar('meshing', detail || 'Meshing...');
-          else if (state === 'ready') set_loading_bar('ready');
-          else if (state === 'error') set_loading_bar('error', detail || 'Error');
+          if (state === 'meshing') set_loading_bar('meshing', detail || 'Meshing STEP...');
+          else if (state === 'ready') {
+            // Don't hide here; many backends emit "ready" before the mesh packet arrives.
+            // We'll hide after a real mesh payload is applied.
+            set_loading_bar('waiting', detail || 'Waiting for mesh...');
+          } else if (state === 'error') set_loading_bar('error', detail || 'Error');
         }
       } catch (e) {
         console.warn('Failed to parse JSON message:', e);
@@ -1670,6 +1710,7 @@ function connect_websocket() {
   ws.onclose = () => {
     console.log('Disconnected, reconnecting...');
     update_status('disconnected', 'Reconnecting in 2s...');
+    if (loading_state !== 'idle') set_loading_bar('error', 'Disconnected while loading');
     if (current_ws === ws) {
       current_ws = null;
     }

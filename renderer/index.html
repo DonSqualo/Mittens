@@ -118,6 +118,19 @@
       background: rgba(0, 40, 0, 0.25);
     }
 
+    .status-link.loading {
+      border-color: #0f0;
+      background: rgba(0, 80, 0, 0.35);
+    }
+
+    .status-link.loading #status-detail {
+      color: #9f9 !important;
+      font-size: 11px !important;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
     .download-buttons {
       position: absolute;
       right: 12px;
@@ -156,7 +169,7 @@
       left: 0;
       right: 0;
       bottom: 0;
-      height: 18px;
+      height: 28px;
       z-index: 150;
       display: none;
       align-items: center;
@@ -164,7 +177,7 @@
       padding: 0 10px;
       background: rgba(0, 0, 0, 0.7);
       border-top: 1px solid #0a5;
-      font-size: 10px;
+      font-size: 11px;
       color: #9f9;
       letter-spacing: 1px;
     }
@@ -180,7 +193,7 @@
 
     #loading-bar-track {
       flex: 1;
-      height: 6px;
+      height: 10px;
       border: 1px solid #0a5;
       background: rgba(0, 35, 0, 0.35);
       position: relative;
@@ -273,7 +286,7 @@
     <canvas id="main-canvas"></canvas>
     <div class="tui-label">Mittens</div>
     <a id="status-link" class="status-link" href="/graph" title="Open renderer/backends menu (Ctrl+K)">
-      <div class="tui-status" id="status-detail" style="color: #555; font-size: 9px;"></div>
+      <div class="tui-status" id="status-detail"></div>
       <div class="tui-status" id="status">⏳ CONNECTING...</div>
     </a>
     <div id="loading-bar" aria-live="polite">

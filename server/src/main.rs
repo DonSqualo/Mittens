@@ -1741,12 +1741,14 @@ fn process_single_file(
                         tgt_t.get::<_, f32>(2).unwrap_or(0.0),
                         tgt_t.get::<_, f32>(3).unwrap_or(0.0),
                     ];
-                    info!(
-                        "View camera parsed: pos=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) fov={:.2} near={:.3} far={:.1}",
-                        position[0], position[1], position[2],
-                        target[0], target[1], target[2],
-                        fov_v, near, far
-                    );
+                    if std::env::var("MITTENS_DEBUG_VIEW_CAMERA").ok().as_deref() == Some("1") {
+                        info!(
+                            "View camera parsed: pos=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) fov={:.2} near={:.3} far={:.1}",
+                            position[0], position[1], position[2],
+                            target[0], target[1], target[2],
+                            fov_v, near, far
+                        );
+                    }
                     Some(CameraState {
                         position,
                         target,
@@ -1755,10 +1757,12 @@ fn process_single_file(
                         far,
                     })
                 } else {
-                    info!(
-                        "View camera table present but incomplete: position_key={} target_key={} fov_key={}",
-                        has_pos, has_tgt, has_fov
-                    );
+                    if std::env::var("MITTENS_DEBUG_VIEW_CAMERA").ok().as_deref() == Some("1") {
+                        info!(
+                            "View camera table present but incomplete: position_key={} target_key={} fov_key={}",
+                            has_pos, has_tgt, has_fov
+                        );
+                    }
                     None
                 }
             } else {
