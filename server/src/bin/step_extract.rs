@@ -22,6 +22,11 @@ struct Cli {
     #[arg(long)]
     list: bool,
 
+    /// Print groups of solids that repeat exactly N times (based on a geometry signature).
+    /// This is useful for finding repeated sub-assemblies (e.g. 5 toolheads).
+    #[arg(long)]
+    repeated: Option<usize>,
+
     /// Export the Nth solid (0-based) into a standalone STEP
     #[arg(long)]
     export_index: Option<usize>,
@@ -35,11 +40,15 @@ struct Cli {
     out: Option<PathBuf>,
 }
 
+#[derive(Clone)]
 struct SolidInfo {
     idx: usize,
     volume: f64,
     area: f64,
     com: (f64, f64, f64),
+    faces: i32,
+    edges: i32,
+    vertices: i32,
 }
 
 fn read_step_shape(path: &Path) -> Result<cxx::UniquePtr<ffi::TopoDS_Shape>> {
@@ -64,15 +73,48 @@ fn solid_info_for(shape: &ffi::TopoDS_Shape, idx: usize) -> Result<SolidInfo> {
     ffi::BRepGProp_SurfaceProperties(shape, area_props.pin_mut());
     let area = area_props.Mass();
 
+    let faces = {
+        let mut m = ffi::new_indexed_map_of_shape();
+        ffi::map_shapes(shape, ffi::TopAbs_ShapeEnum::TopAbs_FACE, m.pin_mut());
+        m.Extent()
+    };
+    let edges = {
+        let mut m = ffi::new_indexed_map_of_shape();
+        ffi::map_shapes(shape, ffi::TopAbs_ShapeEnum::TopAbs_EDGE, m.pin_mut());
+        m.Extent()
+    };
+    let vertices = {
+        let mut m = ffi::new_indexed_map_of_shape();
+        ffi::map_shapes(shape, ffi::TopAbs_ShapeEnum::TopAbs_VERTEX, m.pin_mut());
+        m.Extent()
+    };
+
     Ok(SolidInfo {
         idx,
         volume,
         area,
         com,
+        faces,
+        edges,
+        vertices,
     })
 }
 
-fn list_and_pick(shape: &ffi::TopoDS_Shape, do_list: bool, pick: Option<PickMode>) -> Result<(usize, Option<usize>)> {
+fn q(v: f64) -> i64 {
+    // Quantize to 1e-6 in model units; keeps identical solids together even if minor fp drift.
+    (v * 1_000_000.0).round() as i64
+}
+
+fn signature(info: &SolidInfo) -> (i64, i64, i32, i32, i32) {
+    (q(info.volume), q(info.area), info.faces, info.edges, info.vertices)
+}
+
+fn list_and_pick(
+    shape: &ffi::TopoDS_Shape,
+    do_list: bool,
+    pick: Option<PickMode>,
+    repeated: Option<usize>,
+) -> Result<(usize, Option<usize>)> {
     let mut explorer = ffi::TopExp_Explorer_ctor(shape, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
     let mut count = 0usize;
 
@@ -80,8 +122,11 @@ fn list_and_pick(shape: &ffi::TopoDS_Shape, do_list: bool, pick: Option<PickMode
     let mut best_metric: f64 = f64::INFINITY;
     let mut best_volume: f64 = 0.0;
 
+    let mut sig_groups: std::collections::HashMap<(i64, i64, i32, i32, i32), Vec<SolidInfo>> =
+        std::collections::HashMap::new();
+
     if do_list {
-        println!("# idx\tvolume\tarea\tvol/area\tcom(x,y,z)");
+        println!("# idx\tvolume\tarea\tfaces\tedges\tverts\tvol/area\tcom(x,y,z)");
     }
 
     while explorer.More() {
@@ -91,9 +136,25 @@ fn list_and_pick(shape: &ffi::TopoDS_Shape, do_list: bool, pick: Option<PickMode
 
         if do_list {
             println!(
-                "{}\t{:.6e}\t{:.6e}\t{:.6e}\t({:.3},{:.3},{:.3})",
-                info.idx, info.volume, info.area, ratio, info.com.0, info.com.1, info.com.2
+                "{}\t{:.6e}\t{:.6e}\t{}\t{}\t{}\t{:.6e}\t({:.3},{:.3},{:.3})",
+                info.idx,
+                info.volume,
+                info.area,
+                info.faces,
+                info.edges,
+                info.vertices,
+                ratio,
+                info.com.0,
+                info.com.1,
+                info.com.2
             );
+        }
+
+        if repeated.is_some() {
+            sig_groups
+                .entry(signature(&info))
+                .or_default()
+                .push(info.clone());
         }
 
         if let Some(mode) = pick {
@@ -118,6 +179,38 @@ fn list_and_pick(shape: &ffi::TopoDS_Shape, do_list: bool, pick: Option<PickMode
 
         count += 1;
         explorer.pin_mut().Next();
+    }
+
+    if let Some(n) = repeated {
+        let mut groups: Vec<(usize, (i64, i64, i32, i32, i32), Vec<SolidInfo>)> = sig_groups
+            .into_iter()
+            .filter_map(|(sig, infos)| {
+                if infos.len() == n {
+                    Some((infos.len(), sig, infos))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        groups.sort_by(|a, b| b.0.cmp(&a.0));
+
+        println!("# repeated={} groups={}", n, groups.len());
+        for (_cnt, sig, mut infos) in groups {
+            infos.sort_by(|a, b| a.idx.cmp(&b.idx));
+            let idxs: Vec<String> = infos.iter().map(|i| i.idx.to_string()).collect();
+            let sample = &infos[0];
+            println!(
+                "count={}\tvol={:.6e}\tarea={:.6e}\tfaces={}\tedges={}\tverts={}\tidxs=[{}]\tsig=({},{},{},{},{})",
+                n,
+                sample.volume,
+                sample.area,
+                sample.faces,
+                sample.edges,
+                sample.vertices,
+                idxs.join(","),
+                sig.0, sig.1, sig.2, sig.3, sig.4
+            );
+        }
     }
 
     Ok((count, best_idx))
@@ -173,7 +266,7 @@ fn main() -> Result<()> {
     let shape_ref = shape.as_ref().ok_or_else(|| anyhow!("STEP reader produced null shape"))?;
     eprintln!("[step_extract] loaded STEP, scanning solids...");
 
-    let (count, picked) = list_and_pick(shape_ref, cli.list, cli.pick)?;
+    let (count, picked) = list_and_pick(shape_ref, cli.list, cli.pick, cli.repeated)?;
     if cli.list {
         println!("# solids={}", count);
     }
