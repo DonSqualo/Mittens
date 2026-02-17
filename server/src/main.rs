@@ -554,7 +554,9 @@ fn process_project_files(
 
                 // Keep STEP meshing out-of-process; OCCT can OOM/abort on large assemblies.
                 // View config first so the renderer can get into a known state immediately.
-                let view_binary = serialize_view_config(false, false, None);
+                // STEP meshes (especially thin plates) can be nearly invisible with the x-ray shader
+                // when triangles are coarse. Default to showing edges.
+                let view_binary = serialize_view_config(false, true, None);
                 let _ = tx.send(packet_from_vec(view_binary));
 
                 let deflection_fine = std::env::var("MITTENS_STEP_DEFLECTION")

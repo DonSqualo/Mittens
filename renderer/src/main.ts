@@ -1307,6 +1307,20 @@ function update_mesh(buffer: ArrayBuffer) {
   set_loading_bar('ready');
 
   last_edge_count = result.edges;
+  // Helpful when debugging "invisible" parts: log bbox + current camera.
+  if (DEBUG_WS) {
+    // Avoid extra bbox work in normal runs; parse_binary_mesh already has positions but
+    // Three can compute the bbox cheaply for small meshes.
+    result.geometry.computeBoundingBox();
+    const bb = result.geometry.boundingBox;
+    if (bb) {
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      bb.getSize(size);
+      bb.getCenter(center);
+      console.log(`[mesh] bbox center=(${center.x.toFixed(3)},${center.y.toFixed(3)},${center.z.toFixed(3)}) size=(${size.x.toFixed(3)},${size.y.toFixed(3)},${size.z.toFixed(3)}) camera=(${camera.position.x.toFixed(1)},${camera.position.y.toFixed(1)},${camera.position.z.toFixed(1)}) target=(${controls.target.x.toFixed(1)},${controls.target.y.toFixed(1)},${controls.target.z.toFixed(1)})`);
+    }
+  }
 
   const material = create_xray_material(flat_shading);
   current_mesh = new THREE.Mesh(result.geometry, material);
