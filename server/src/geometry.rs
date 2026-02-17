@@ -2,6 +2,7 @@
 //! Uses manifold3d for guaranteed watertight manifold meshes
 
 use anyhow::{anyhow, Result};
+use crate::cad_io;
 use crate::ir;
 use crate::thread_primitives::{generate_external_thread, generate_internal_thread};
 use manifold3d::types::{Matrix4x3, PositiveF64, PositiveI32, Vec3};
@@ -11,6 +12,7 @@ use serde_json::Value as JsonValue;
 use std::alloc::{alloc, Layout};
 use std::collections::HashMap;
 use std::os::raw::c_void;
+use std::path::Path;
 
 /// Mesh data for WebSocket transfer
 pub struct MeshData {
@@ -1154,6 +1156,24 @@ fn build_mesh_recursive_from_ir(
                 apply_color_to_mesh(&mut mesh, r, g, b);
             }
         }
+        Ok(mesh)
+    } else if obj.obj_type == "mesh_file" {
+        let params = obj
+            .params
+            .as_ref()
+            .ok_or_else(|| anyhow!("mesh_file missing params"))?;
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("mesh_file params.path must be a string"))?;
+
+        let mut mesh = cad_io::load_mesh_from_path(Path::new(path_str))
+            .map_err(|e| anyhow!("failed to load mesh_file '{}': {}", path_str, e))?;
+
+        if let Some((r, g, b)) = get_material_color_ir(obj) {
+            apply_color_to_mesh(&mut mesh, r, g, b);
+        }
+        apply_mesh_transform_ir(&mut mesh, &obj.transform);
         Ok(mesh)
     } else {
         let manifold = build_manifold_primitive_from_ir(lua, obj, circular_segments)?;

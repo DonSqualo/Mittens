@@ -24,6 +24,11 @@ torus = Mittens.primitives.torus
 ring = Mittens.primitives.ring
 text = Mittens.primitives.text
 
+-- Export mesh import functions
+import_mesh = Mittens.primitives.import_mesh
+import_stl = Mittens.primitives.import_stl
+import_step = Mittens.primitives.import_step
+
 -- Export transform functions
 translate = Mittens.transforms.translate
 rotate = Mittens.transforms.rotate

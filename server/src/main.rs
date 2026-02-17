@@ -1519,6 +1519,11 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         if loaded and loaded.clear then loaded.clear() end
     "#).exec();
 
+    // Expose the project directory so Lua can resolve relative asset paths (e.g. imported STLs).
+    // This is intentionally a plain string; stdlib handles joining.
+    lua.globals()
+        .set("MITTENS_PROJECT_DIR", base_dir.to_string_lossy().to_string())?;
+
     let result: mlua::Value = lua.load(content).eval()?;
 
     // Extract view config

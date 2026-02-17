@@ -82,6 +82,46 @@ local function Shape(sdf_func, bounds, metadata)
   return shape
 end
 
+local function resolve_project_path(path)
+  if type(path) ~= "string" then
+    error("import_*() expects a string path")
+  end
+  if path:sub(1, 1) == "/" then
+    return path
+  end
+  local base = rawget(_G, "MITTENS_PROJECT_DIR")
+  if type(base) == "string" and #base > 0 then
+    if base:sub(-1) == "/" then
+      return base .. path
+    end
+    return base .. "/" .. path
+  end
+  return path
+end
+
+--- Import an external mesh file (.stl / .step / .stp) as a renderable object.
+-- Note: this is not an SDF primitive and cannot participate in CSG booleans.
+-- @param path Path to mesh file (absolute or relative to MITTENS_PROJECT_DIR)
+-- @return Shape-like object (supports at/rotate/scale/material/color/name)
+function Primitives.import_mesh(path)
+  local resolved = resolve_project_path(path)
+  return Shape(
+    function(x, y, z) return 1 end, -- not used (mesh is loaded by the server)
+    {min = {-1e6, -1e6, -1e6}, max = {1e6, 1e6, 1e6}},
+    {primitive = "mesh_file", params = {path = resolved}}
+  )
+end
+
+--- Import an STL mesh (alias for import_mesh)
+function Primitives.import_stl(path)
+  return Primitives.import_mesh(path)
+end
+
+--- Import a STEP mesh (alias for import_mesh)
+function Primitives.import_step(path)
+  return Primitives.import_mesh(path)
+end
+
 -- SDF for box (corner at origin, extends to +w, +d, +h)
 local function box_sdf(w, d, h)
   return function(x, y, z)
