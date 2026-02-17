@@ -556,6 +556,7 @@ pub mod ffi {
 
         // BRepLib
         pub fn BRepLibBuildCurves3d(shape: &TopoDS_Shape) -> bool;
+        pub fn interface_static_set_cval(key: String, value: String) -> bool;
 
         // Fillets
         type BRepFilletAPI_MakeFillet;

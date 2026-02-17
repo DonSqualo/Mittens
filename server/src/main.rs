@@ -66,6 +66,23 @@ fn step_mesher_path() -> Result<PathBuf> {
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("failed to resolve current_exe parent dir"))?;
+
+    // Common dev layout: server runs from `target/debug`, but the STEP mesher is much more
+    // stable (and faster) in release mode. Prefer it automatically if present.
+    if dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s == "debug")
+        .unwrap_or(false)
+    {
+        if let Some(parent) = dir.parent() {
+            let release = parent.join("release").join("step_mesher");
+            if release.exists() {
+                return Ok(release);
+            }
+        }
+    }
+
     Ok(dir.join("step_mesher"))
 }
 
@@ -176,72 +193,109 @@ fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>>
     // Keep meshing isolated and bounded; OCCT can use huge amounts of memory on large assemblies.
     // Use `prlimit` (if available) to cap address space for the mesher process so the parent
     // server stays alive and the system doesn't get dragged into OOM-killer territory.
+    // `prlimit --as=...` has been observed to trigger OCCT instability on some systems.
+    // Keep it opt-in; users can set MITTENS_STEP_MESHER_MAX_AS_MB if they need a hard cap.
     let max_as_mb: u64 = std::env::var("MITTENS_STEP_MESHER_MAX_AS_MB")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(12_000);
+        .unwrap_or(0);
 
-    let mut cmd = if max_as_mb == 0 {
-        std::process::Command::new(&mesher)
-    } else {
-        let max_as_bytes = max_as_mb
-            .saturating_mul(1024)
-            .saturating_mul(1024);
-        let mut c = std::process::Command::new("prlimit");
-        c.arg(format!("--as={}", max_as_bytes))
-            .arg("--")
-            .arg(&mesher);
-        c
+    let run_once = |disable_fixshape: bool| -> Result<Vec<u8>> {
+        let mut cmd = if max_as_mb == 0 {
+            std::process::Command::new(&mesher)
+        } else {
+            let max_as_bytes = max_as_mb
+                .saturating_mul(1024)
+                .saturating_mul(1024);
+            let mut c = std::process::Command::new("prlimit");
+            c.arg(format!("--as={}", max_as_bytes))
+                .arg("--")
+                .arg(&mesher);
+            c
+        };
+
+        // STEP meshing only needs OCCT. If the parent process has Manifold's bundled libc++/libc++abi
+        // early in LD_LIBRARY_PATH, it can destabilize OCCT at runtime. Prefer an OCCT-only path for
+        // the mesher subprocess when possible.
+        if let Ok(ld) = std::env::var("LD_LIBRARY_PATH") {
+            let occt_only: Vec<&str> = ld
+                .split(':')
+                .filter(|p| p.contains("/occt") || p.contains("occt"))
+                .collect();
+            if !occt_only.is_empty() {
+                cmd.env("LD_LIBRARY_PATH", occt_only.join(":"));
+            }
+        }
+
+        if disable_fixshape {
+            cmd.env("MITTENS_STEP_DISABLE_FIXSHAPE", "1");
+        }
+
+        let tmp_dir = std::env::var_os("MITTENS_STEP_MESHER_TMP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir());
+        let nonce = format!(
+            "mittens_step_{}_{}_{}_{}.bin",
+            std::process::id(),
+            if disable_fixshape { "nofix" } else { "fix" },
+            deflection.to_string().replace('.', "_"),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let out_path = tmp_dir.join(nonce);
+
+        let output = cmd
+            .arg("--deflection")
+            .arg(deflection.to_string())
+            .arg("--out")
+            .arg(&out_path)
+            .arg(input)
+            // Some OCCT builds can emit diagnostics on stdout; avoid corrupting binary output.
+            .stdout(std::process::Stdio::null())
+            .output()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to spawn step mesher {}: {}",
+                    mesher.display(),
+                    e
+                )
+            })?;
+
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&out_path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = if stderr.len() > 16 * 1024 {
+                format!("{}...[truncated]", &stderr[..16 * 1024])
+            } else {
+                stderr.to_string()
+            };
+            return Err(anyhow::anyhow!(
+                "step mesher failed (status={}) stderr={}",
+                output.status,
+                stderr
+            ));
+        }
+
+        let bytes = std::fs::read(&out_path)
+            .with_context(|| format!("failed to read step mesher output {}", out_path.display()))?;
+        let _ = std::fs::remove_file(&out_path);
+        Ok(bytes)
     };
 
-    let tmp_dir = std::env::var_os("MITTENS_STEP_MESHER_TMP_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir());
-    let nonce = format!(
-        "mittens_step_{}_{}_{}.bin",
-        std::process::id(),
-        deflection.to_string().replace('.', "_"),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
-    let out_path = tmp_dir.join(nonce);
-
-    let output = cmd
-        .arg("--deflection")
-        .arg(deflection.to_string())
-        .arg("--out")
-        .arg(&out_path)
-        .arg(input)
-        // Some OCCT builds can emit diagnostics on stdout; avoid corrupting binary output.
-        .stdout(std::process::Stdio::null())
-        .output()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to spawn step mesher {}: {}",
-                mesher.display(),
-                e
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = if stderr.len() > 16 * 1024 {
-            format!("{}...[truncated]", &stderr[..16 * 1024])
-        } else {
-            stderr.to_string()
-        };
-        return Err(anyhow::anyhow!(
-            "step mesher failed (status={}) stderr={}",
-            output.status,
-            stderr
-        ));
-    }
-
-    let bytes = std::fs::read(&out_path)
-        .with_context(|| format!("failed to read step mesher output {}", out_path.display()))?;
-    let _ = std::fs::remove_file(&out_path);
+    // Retry strategy:
+    // 1) Default OCCT STEP import (includes ShapeFix)
+    // 2) If that fails/crashes, retry with ShapeFix disabled
+    let bytes = match run_once(false) {
+        Ok(bytes) => bytes,
+        Err(e1) => match run_once(true) {
+            Ok(bytes) => bytes,
+            Err(e2) => {
+                return Err(anyhow::anyhow!("step mesher failed (fixshape+nofixshape). first={e1} second={e2}"));
+            }
+        },
+    };
 
     // Minimal sanity check: [u32 num_vertices][u32 num_indices]
     if bytes.len() < 8 {

@@ -22,14 +22,19 @@ cargo_target_dir() {
 }
 
 build_profile() {
-  # Dev should be fast by default. Use MITTENS_BUILD_PROFILE=release when you
-  # explicitly want optimized binaries.
-  echo "${MITTENS_BUILD_PROFILE:-debug}"
+  # Server build profile (fast by default). MITTENS_BUILD_PROFILE is kept for
+  # backward compatibility.
+  echo "${MITTENS_SERVER_PROFILE:-${MITTENS_BUILD_PROFILE:-debug}}"
+}
+
+mesher_profile() {
+  # STEP meshing is much more stable (and faster) in release builds on OCCT.
+  echo "${MITTENS_STEP_MESHER_PROFILE:-release}"
 }
 
 cargo_profile_flag() {
-  local profile
-  profile="$(build_profile)"
+  local profile="${1:-}"
+  [[ -n "$profile" ]] || profile="$(build_profile)"
   case "$profile" in
     release) echo "--release" ;;
     debug|dev|"") echo "" ;;
@@ -38,8 +43,8 @@ cargo_profile_flag() {
 }
 
 cargo_profile_dir() {
-  local profile
-  profile="$(build_profile)"
+  local profile="${1:-}"
+  [[ -n "$profile" ]] || profile="$(build_profile)"
   case "$profile" in
     release) echo "release" ;;
     debug|dev|"") echo "debug" ;;
@@ -135,10 +140,13 @@ ensure_backend_bin_for_worktree() {
     fi
   fi
   ensure_cargo_target_dir
-  # Default to a fast dev build. Override with MITTENS_BUILD_PROFILE=release.
-  local profile_flag=()
-  read -r -a profile_flag <<<"$(cargo_profile_flag)"
-  (cd "$worktree/server" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet "${profile_flag[@]}" --bin mittens-server --bin step_mesher)
+  # Build the server fast, but keep the STEP mesher in release mode for stability.
+  local server_flag=()
+  local mesher_flag=()
+  read -r -a server_flag <<<"$(cargo_profile_flag "$(build_profile)")"
+  read -r -a mesher_flag <<<"$(cargo_profile_flag "$(mesher_profile)")"
+  (cd "$worktree/server" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet "${server_flag[@]}" --bin mittens-server)
+  (cd "$worktree/server" && CARGO_TARGET_DIR="$(cargo_target_dir)" cargo build --quiet "${mesher_flag[@]}" --bin step_mesher)
 }
 
 registry_bin_path() {
@@ -151,11 +159,11 @@ router_bin_path() {
 
 backend_bin_path() {
   # Note: shared across worktrees when using a shared cargo target dir.
-  echo "$(cargo_target_dir)/$(cargo_profile_dir)/mittens-server"
+  echo "$(cargo_target_dir)/$(cargo_profile_dir "$(build_profile)")/mittens-server"
 }
 
 step_mesher_bin_path() {
-  echo "$(cargo_target_dir)/$(cargo_profile_dir)/step_mesher"
+  echo "$(cargo_target_dir)/$(cargo_profile_dir "$(mesher_profile)")/step_mesher"
 }
 
 registry_cmd_with_build() {

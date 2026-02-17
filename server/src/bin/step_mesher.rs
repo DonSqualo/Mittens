@@ -48,6 +48,20 @@ fn main() -> Result<()> {
     #[cfg(feature = "occt-support")]
     {
         use opencascade::primitives::Shape;
+        use opencascade_sys::ffi;
+
+        let disable_fixshape = std::env::var("MITTENS_STEP_DISABLE_FIXSHAPE")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            })
+            .unwrap_or(false);
+        if disable_fixshape {
+            // OCCT STEP import applies ShapeFix by default, which can crash on some large/complex
+            // assemblies. Disabling it is a pragmatic "load something" fallback.
+            let _ = ffi::interface_static_set_cval("FromSTEP.exec.op".to_string(), "".to_string());
+        }
 
         let shape = Shape::read_step(&input)
             .with_context(|| format!("failed to read STEP {}", input.display()))?;

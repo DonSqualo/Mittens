@@ -42,6 +42,7 @@
 #include <Geom_Plane.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <Interface_Static.hxx>
 #include <NCollection_Array1.hxx>
 #include <NCollection_Array2.hxx>
 #include <Poly_Connect.hxx>
@@ -186,6 +187,10 @@ inline std::unique_ptr<gp_Pnt> BRepAdaptor_Curve_value(const BRepAdaptor_Curve &
 
 // BRepLib
 inline bool BRepLibBuildCurves3d(const TopoDS_Shape &shape) { return BRepLib::BuildCurves3d(shape); }
+
+inline bool interface_static_set_cval(rust::String key, rust::String value) {
+  return Interface_Static::SetCVal(key.c_str(), value.c_str());
+}
 
 inline void MakeThickSolidByJoin(BRepOffsetAPI_MakeThickSolid &make_thick_solid, const TopoDS_Shape &shape,
                                  const TopTools_ListOfShape &closing_faces, const Standard_Real offset,
