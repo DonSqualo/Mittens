@@ -37,6 +37,13 @@ struct Cli {
     #[arg(long, value_enum)]
     pick: Option<PickMode>,
 
+    /// When used with `--repeated N --pick min-y`, bundle nearby repeated solids (same instance
+    /// position across repeated groups) into a single exported STEP compound.
+    ///
+    /// This is useful when a "part" is represented as multiple solids (e.g. plate + extrusions).
+    #[arg(long)]
+    bundle_nearby_mm: Option<f64>,
+
     /// Output STEP path (required for --export-index/--pick)
     #[arg(long)]
     out: Option<PathBuf>,
@@ -162,7 +169,8 @@ fn list_and_pick(
     do_list: bool,
     pick: Option<PickMode>,
     repeated: Option<usize>,
-) -> Result<(usize, Option<usize>)> {
+    bundle_nearby_mm: Option<f64>,
+) -> Result<(usize, Option<usize>, Vec<usize>)> {
     let mut explorer = ffi::TopExp_Explorer_ctor(shape, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
     let mut count = 0usize;
     let mut infos: Vec<SolidInfo> = Vec::new();
@@ -283,7 +291,8 @@ fn list_and_pick(
             explorer2.pin_mut().Next();
         }
 
-        for (_cnt, sig, mut infos) in groups {
+        for (_cnt, sig, infos) in &groups {
+            let mut infos = infos.clone();
             infos.sort_by(|a, b| a.idx.cmp(&b.idx));
             let idxs: Vec<String> = infos.iter().map(|i| i.idx.to_string()).collect();
             let sample = &infos[0];
@@ -322,6 +331,8 @@ fn list_and_pick(
             );
         }
 
+        let mut bundle_idxs: Vec<usize> = Vec::new();
+
         // If the user asked to pick min-Y and also asked for repeated groups,
         // prefer the repeated selection.
         if pick == Some(PickMode::MinY) {
@@ -335,11 +346,79 @@ fn list_and_pick(
                     println!("# pick=min-y idx={}", idx);
                 }
                 best_idx = Some(idx);
+
+                // Optional bundling: find other repeated solids that belong to the same instance
+                // (same ordinal position within each repeated-`n` group), and are spatially
+                // near the picked solid.
+                if let (Some(thr), Some(sel_bb)) = (bundle_nearby_mm, bbox_by_idx.get(&idx)) {
+                    let sel_center = (
+                        (sel_bb.0 + sel_bb.3) * 0.5,
+                        (sel_bb.1 + sel_bb.4) * 0.5,
+                        (sel_bb.2 + sel_bb.5) * 0.5,
+                    );
+
+                    // Determine which "instance slot" (0..n-1) the picked solid is in.
+                    let mut picked_slot: Option<usize> = None;
+                    for (_cnt, _sig, infos) in &groups {
+                        let mut idxs: Vec<usize> = infos.iter().map(|i| i.idx).collect();
+                        idxs.sort();
+                        if let Some(pos) = idxs.iter().position(|&x| x == idx) {
+                            picked_slot = Some(pos);
+                            break;
+                        }
+                    }
+
+                    if let Some(slot) = picked_slot {
+                        let mut chosen: Vec<usize> = Vec::new();
+                        chosen.push(idx);
+
+                        for (_cnt, _sig, infos) in &groups {
+                            let mut idxs: Vec<usize> = infos.iter().map(|i| i.idx).collect();
+                            idxs.sort();
+                            if slot >= idxs.len() {
+                                continue;
+                            }
+                            let other_idx = idxs[slot];
+                            let Some(bb) = bbox_by_idx.get(&other_idx) else {
+                                continue;
+                            };
+                            let center = (
+                                (bb.0 + bb.3) * 0.5,
+                                (bb.1 + bb.4) * 0.5,
+                                (bb.2 + bb.5) * 0.5,
+                            );
+                            let dx = center.0 - sel_center.0;
+                            let dy = center.1 - sel_center.1;
+                            let dz = center.2 - sel_center.2;
+                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                            if dist <= thr {
+                                chosen.push(other_idx);
+                            }
+                        }
+
+                        chosen.sort();
+                        chosen.dedup();
+                        if chosen.len() > 1 {
+                            println!(
+                                "# bundle_nearby_mm={} slot={} idxs=[{}]",
+                                thr,
+                                slot,
+                                chosen
+                                    .iter()
+                                    .map(|i| i.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            );
+                            bundle_idxs = chosen;
+                        }
+                    }
+                }
             }
         }
+        return Ok((count, best_idx, bundle_idxs));
     }
 
-    Ok((count, best_idx))
+    Ok((count, best_idx, Vec::new()))
 }
 
 fn export_solid_by_index(root: &ffi::TopoDS_Shape, idx: usize, out_path: &Path) -> Result<()> {
@@ -371,6 +450,83 @@ fn export_solid_by_index(root: &ffi::TopoDS_Shape, idx: usize, out_path: &Path) 
     bail!("solid index {} out of range (solids={})", idx, cur_idx)
 }
 
+fn export_compound_by_indices(
+    root: &ffi::TopoDS_Shape,
+    idxs: &[usize],
+    out_path: &Path,
+) -> Result<()> {
+    if idxs.is_empty() {
+        bail!("no indices provided for compound export");
+    }
+
+    let want: std::collections::HashSet<usize> = idxs.iter().copied().collect();
+
+    let mut compound = ffi::TopoDS_Compound_ctor();
+    let builder = ffi::BRep_Builder_ctor();
+    let builder = ffi::BRep_Builder_upcast_to_topods_builder(&builder);
+    builder.MakeCompound(compound.pin_mut());
+    let mut compound_shape = ffi::TopoDS_Compound_as_shape(compound);
+
+    let mut explorer = ffi::TopExp_Explorer_ctor(root, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
+    let mut cur_idx = 0usize;
+    let mut com_acc = (0.0f64, 0.0f64, 0.0f64);
+    let mut vol_acc = 0.0f64;
+    let mut added = 0usize;
+
+    while explorer.More() {
+        if want.contains(&cur_idx) {
+            let cur = explorer.Current();
+            builder.Add(compound_shape.pin_mut(), cur);
+
+            if let Ok(info) = solid_info_for(cur, cur_idx) {
+                if info.volume.is_finite() && info.volume > 0.0 {
+                    com_acc.0 += info.com.0 * info.volume;
+                    com_acc.1 += info.com.1 * info.volume;
+                    com_acc.2 += info.com.2 * info.volume;
+                    vol_acc += info.volume;
+                }
+            }
+            added += 1;
+        }
+        cur_idx += 1;
+        explorer.pin_mut().Next();
+    }
+
+    if added == 0 {
+        bail!(
+            "none of the requested indices were found (max_idx={})",
+            cur_idx
+        );
+    }
+
+    let com = if vol_acc > 0.0 {
+        (
+            com_acc.0 / vol_acc,
+            com_acc.1 / vol_acc,
+            com_acc.2 / vol_acc,
+        )
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+
+    let mut trsf = ffi::new_transform();
+    let v = ffi::new_vec(-com.0, -com.1, -com.2);
+    trsf.pin_mut().set_translation_vec(&v);
+
+    let compound_ref = compound_shape
+        .as_ref()
+        .ok_or_else(|| anyhow!("compound shape is null"))?;
+    let mut xform = ffi::BRepBuilderAPI_Transform_ctor(compound_ref, &trsf, false);
+    let progress = ffi::Message_ProgressRange_ctor();
+    xform.pin_mut().Build(&progress);
+    if !xform.IsDone() {
+        bail!("OCCT transform failed while centering compound");
+    }
+
+    write_step(xform.pin_mut().Shape(), out_path)?;
+    Ok(())
+}
+
 fn write_step(shape: &ffi::TopoDS_Shape, out_path: &Path) -> Result<()> {
     let mut writer = ffi::STEPControl_Writer_ctor();
     let status = ffi::transfer_shape(writer.pin_mut(), shape);
@@ -394,7 +550,13 @@ fn main() -> Result<()> {
         .ok_or_else(|| anyhow!("STEP reader produced null shape"))?;
     eprintln!("[step_extract] loaded STEP, scanning solids...");
 
-    let (count, picked) = list_and_pick(shape_ref, cli.list, cli.pick, cli.repeated)?;
+    let (count, picked, bundle) = list_and_pick(
+        shape_ref,
+        cli.list,
+        cli.pick,
+        cli.repeated,
+        cli.bundle_nearby_mm,
+    )?;
     if cli.list {
         println!("# solids={}", count);
     }
@@ -410,8 +572,14 @@ fn main() -> Result<()> {
             .out
             .as_ref()
             .ok_or_else(|| anyhow!("--out is required for export"))?;
-        export_solid_by_index(shape_ref, i, out_path)
-            .with_context(|| format!("failed to write {}", out_path.display()))?;
+        // If the user asked for bundling and we computed a non-trivial bundle, export a compound.
+        if cli.export_index.is_none() && bundle.len() > 1 && bundle.contains(&i) {
+            export_compound_by_indices(shape_ref, &bundle, out_path)
+                .with_context(|| format!("failed to write {}", out_path.display()))?;
+        } else {
+            export_solid_by_index(shape_ref, i, out_path)
+                .with_context(|| format!("failed to write {}", out_path.display()))?;
+        }
         eprintln!("wrote {}", out_path.display());
     }
 
