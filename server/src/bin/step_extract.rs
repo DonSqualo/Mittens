@@ -24,6 +24,10 @@ struct Cli {
     #[arg(long)]
     list: bool,
 
+    /// When used with `--list`, also print axis-aligned bounding boxes.
+    #[arg(long)]
+    list_bbox: bool,
+
     /// Print groups of solids that repeat exactly N times (based on a geometry signature).
     /// This is useful for finding repeated sub-assemblies (e.g. 5 toolheads).
     #[arg(long)]
@@ -32,6 +36,11 @@ struct Cli {
     /// Export the Nth solid (0-based) into a standalone STEP
     #[arg(long)]
     export_index: Option<usize>,
+
+    /// Export a compound STEP containing a comma-separated list of solid indices (0-based).
+    /// Example: `--export-indices 1,2,5`
+    #[arg(long)]
+    export_indices: Option<String>,
 
     /// Auto-pick a solid by heuristic and export it
     #[arg(long, value_enum)]
@@ -167,6 +176,7 @@ fn signature(info: &SolidInfo) -> (i64, i64, i32, i32, i32) {
 fn list_and_pick(
     shape: &ffi::TopoDS_Shape,
     do_list: bool,
+    list_bbox: bool,
     pick: Option<PickMode>,
     repeated: Option<usize>,
     bundle_nearby_mm: Option<f64>,
@@ -183,7 +193,7 @@ fn list_and_pick(
         explorer.pin_mut().Next();
     }
 
-    if do_list {
+    if do_list && !list_bbox {
         println!("# idx\tvolume\tarea\tfaces\tedges\tverts\tvol/area\tcom(x,y,z)");
         for info in &infos {
             let ratio = if info.area > 1e-12 {
@@ -204,6 +214,38 @@ fn list_and_pick(
                 info.com.1,
                 info.com.2
             );
+        }
+    }
+
+    if do_list && list_bbox {
+        println!("# idx\tvolume\tarea\tfaces\tedges\tverts\tvol/area\tyspan\tbbox(xmin,ymin,zmin,xmax,ymax,zmax)\tcom(x,y,z)");
+        let mut explorer = ffi::TopExp_Explorer_ctor(shape, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
+        let mut idx = 0usize;
+        while explorer.More() {
+            let cur = explorer.Current();
+            let info = &infos[idx];
+            let ratio = if info.area > 1e-12 {
+                info.volume / info.area
+            } else {
+                f64::NAN
+            };
+            let bb = bbox_for(cur)?.unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+            let yspan = bb.4 - bb.1;
+            println!(
+                "{}\t{:.6e}\t{:.6e}\t{}\t{}\t{}\t{:.6e}\t{:.6e}\t({:.3},{:.3},{:.3},{:.3},{:.3},{:.3})\t({:.3},{:.3},{:.3})",
+                info.idx,
+                info.volume,
+                info.area,
+                info.faces,
+                info.edges,
+                info.vertices,
+                ratio,
+                yspan,
+                bb.0, bb.1, bb.2, bb.3, bb.4, bb.5,
+                info.com.0, info.com.1, info.com.2
+            );
+            idx += 1;
+            explorer.pin_mut().Next();
         }
     }
 
@@ -356,61 +398,89 @@ fn list_and_pick(
                         (sel_bb.1 + sel_bb.4) * 0.5,
                         (sel_bb.2 + sel_bb.5) * 0.5,
                     );
+                    let sel_maxy = sel_bb.4;
+                    let sel_xmin = sel_bb.0;
+                    let sel_xmax = sel_bb.3;
+                    let sel_zmin = sel_bb.2;
+                    let sel_zmax = sel_bb.5;
 
-                    // Determine which "instance slot" (0..n-1) the picked solid is in.
-                    let mut picked_slot: Option<usize> = None;
-                    for (_cnt, _sig, infos) in &groups {
-                        let mut idxs: Vec<usize> = infos.iter().map(|i| i.idx).collect();
-                        idxs.sort();
-                        if let Some(pos) = idxs.iter().position(|&x| x == idx) {
-                            picked_slot = Some(pos);
-                            break;
+                    // Distance between two 1D intervals (0 if overlapping/touching).
+                    let gap_1d = |a0: f64, a1: f64, b0: f64, b1: f64| -> f64 {
+                        if a1 < b0 {
+                            b0 - a1
+                        } else if b1 < a0 {
+                            a0 - b1
+                        } else {
+                            0.0
                         }
-                    }
+                    };
 
-                    if let Some(slot) = picked_slot {
-                        let mut chosen: Vec<usize> = Vec::new();
-                        chosen.push(idx);
+                    let mut chosen: Vec<usize> = Vec::new();
+                    chosen.push(idx);
 
-                        for (_cnt, _sig, infos) in &groups {
-                            let mut idxs: Vec<usize> = infos.iter().map(|i| i.idx).collect();
-                            idxs.sort();
-                            if slot >= idxs.len() {
+                    // For each repeated=5 group, pick the member that's closest (in XZ) to the
+                    // selected plate instance, subject to the "in front" and "attached" filters.
+                    for (_cnt, _sig, infos) in &groups {
+                        let mut best: Option<(usize, f64)> = None;
+                        for info in infos {
+                            let other_idx = info.idx;
+                            if other_idx == idx {
                                 continue;
                             }
-                            let other_idx = idxs[slot];
                             let Some(bb) = bbox_by_idx.get(&other_idx) else {
                                 continue;
                             };
+
+                            // Direction filter: exclude solids that are clearly behind the plate.
+                            let other_miny = bb.1;
+                            let y_margin = 6.0; // allow some overlap/clearance/fasteners
+                            if other_miny > sel_maxy + y_margin {
+                                continue;
+                            }
+
+                            // "Attached in XZ" filter: the boxes should touch/overlap in XZ, or be
+                            // within a small gap. This avoids grabbing the motor block behind.
+                            let gap_x = gap_1d(sel_xmin, sel_xmax, bb.0, bb.3);
+                            let gap_z = gap_1d(sel_zmin, sel_zmax, bb.2, bb.5);
+                            let gap_xz = (gap_x * gap_x + gap_z * gap_z).sqrt();
+                            if gap_xz > 4.0 {
+                                continue;
+                            }
+
                             let center = (
                                 (bb.0 + bb.3) * 0.5,
                                 (bb.1 + bb.4) * 0.5,
                                 (bb.2 + bb.5) * 0.5,
                             );
                             let dx = center.0 - sel_center.0;
-                            let dy = center.1 - sel_center.1;
                             let dz = center.2 - sel_center.2;
-                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                            if dist <= thr {
-                                chosen.push(other_idx);
+                            let dist_xz = (dx * dx + dz * dz).sqrt();
+
+                            if best.map(|b| dist_xz < b.1).unwrap_or(true) {
+                                best = Some((other_idx, dist_xz));
                             }
                         }
 
-                        chosen.sort();
-                        chosen.dedup();
-                        if chosen.len() > 1 {
-                            println!(
-                                "# bundle_nearby_mm={} slot={} idxs=[{}]",
-                                thr,
-                                slot,
-                                chosen
-                                    .iter()
-                                    .map(|i| i.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            );
-                            bundle_idxs = chosen;
+                        if let Some((best_idx, dist_xz)) = best {
+                            if dist_xz <= thr {
+                                chosen.push(best_idx);
+                            }
                         }
+                    }
+
+                    chosen.sort();
+                    chosen.dedup();
+                    if chosen.len() > 1 {
+                        println!(
+                            "# bundle_nearby_mm={} idxs=[{}]",
+                            thr,
+                            chosen
+                                .iter()
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
+                        bundle_idxs = chosen;
                     }
                 }
             }
@@ -467,17 +537,15 @@ fn export_compound_by_indices(
     builder.MakeCompound(compound.pin_mut());
     let mut compound_shape = ffi::TopoDS_Compound_as_shape(compound);
 
+    // First pass: compute a volume-weighted center-of-mass for the selected solids.
     let mut explorer = ffi::TopExp_Explorer_ctor(root, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
     let mut cur_idx = 0usize;
     let mut com_acc = (0.0f64, 0.0f64, 0.0f64);
     let mut vol_acc = 0.0f64;
     let mut added = 0usize;
-
     while explorer.More() {
         if want.contains(&cur_idx) {
             let cur = explorer.Current();
-            builder.Add(compound_shape.pin_mut(), cur);
-
             if let Ok(info) = solid_info_for(cur, cur_idx) {
                 if info.volume.is_finite() && info.volume > 0.0 {
                     com_acc.0 += info.com.0 * info.volume;
@@ -491,12 +559,8 @@ fn export_compound_by_indices(
         cur_idx += 1;
         explorer.pin_mut().Next();
     }
-
     if added == 0 {
-        bail!(
-            "none of the requested indices were found (max_idx={})",
-            cur_idx
-        );
+        bail!("none of the requested indices were found");
     }
 
     let com = if vol_acc > 0.0 {
@@ -509,21 +573,36 @@ fn export_compound_by_indices(
         (0.0, 0.0, 0.0)
     };
 
+    // Second pass: apply the translation per-solid and add to compound.
+    // Avoid transforming the compound itself; that can crash on some OCCT builds.
     let mut trsf = ffi::new_transform();
     let v = ffi::new_vec(-com.0, -com.1, -com.2);
     trsf.pin_mut().set_translation_vec(&v);
 
+    let mut transforms: Vec<cxx::UniquePtr<ffi::BRepBuilderAPI_Transform>> = Vec::new();
+    let mut explorer = ffi::TopExp_Explorer_ctor(root, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
+    let mut cur_idx = 0usize;
+    while explorer.More() {
+        if want.contains(&cur_idx) {
+            let cur = explorer.Current();
+            let mut xform = ffi::BRepBuilderAPI_Transform_ctor(cur, &trsf, false);
+            let progress = ffi::Message_ProgressRange_ctor();
+            xform.pin_mut().Build(&progress);
+            if !xform.IsDone() {
+                bail!("OCCT transform failed while centering solid {}", cur_idx);
+            }
+            let shape_ref = xform.pin_mut().Shape();
+            builder.Add(compound_shape.pin_mut(), shape_ref);
+            transforms.push(xform);
+        }
+        cur_idx += 1;
+        explorer.pin_mut().Next();
+    }
+
     let compound_ref = compound_shape
         .as_ref()
         .ok_or_else(|| anyhow!("compound shape is null"))?;
-    let mut xform = ffi::BRepBuilderAPI_Transform_ctor(compound_ref, &trsf, false);
-    let progress = ffi::Message_ProgressRange_ctor();
-    xform.pin_mut().Build(&progress);
-    if !xform.IsDone() {
-        bail!("OCCT transform failed while centering compound");
-    }
-
-    write_step(xform.pin_mut().Shape(), out_path)?;
+    write_step(compound_ref, out_path)?;
     Ok(())
 }
 
@@ -553,12 +632,32 @@ fn main() -> Result<()> {
     let (count, picked, bundle) = list_and_pick(
         shape_ref,
         cli.list,
+        cli.list_bbox,
         cli.pick,
         cli.repeated,
         cli.bundle_nearby_mm,
     )?;
     if cli.list {
         println!("# solids={}", count);
+    }
+
+    // Explicit compound export wins.
+    if let Some(csv) = &cli.export_indices {
+        let out_path = cli
+            .out
+            .as_ref()
+            .ok_or_else(|| anyhow!("--out is required for export"))?;
+        let idxs: Vec<usize> = csv
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<usize>())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("failed to parse --export-indices: {e}"))?;
+        export_compound_by_indices(shape_ref, &idxs, out_path)
+            .with_context(|| format!("failed to write {}", out_path.display()))?;
+        eprintln!("wrote {}", out_path.display());
+        return Ok(());
     }
 
     let export_idx = match (cli.export_index, picked) {

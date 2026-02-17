@@ -592,6 +592,7 @@ fn process_project_files(
                     circular_segments: 32,
                     camera: None,
                     labels: Vec::new(),
+                    dims: Vec::new(),
                     exports: vec![file_name],
                     scene_ir: ir::SceneIr {
                         kind: "scene".to_string(),
@@ -850,11 +851,12 @@ fn process_project_files(
                 let _ = tx.send(packet_from_vec(binary));
                 let _ = exports_tx.send(result.exports.clone());
 
-                // Send labels as JSON if any
-                if !result.labels.is_empty() {
+                // Send labels + dimensions as JSON if any.
+                if !result.labels.is_empty() || !result.dims.is_empty() {
                     let labels_json = serde_json::json!({
                         "type": "labels",
-                        "labels": result.labels
+                        "labels": result.labels,
+                        "dims": result.dims,
                     });
                     if let Ok(json_str) = serde_json::to_string(&labels_json) {
                         let _ = labels_tx.send(json_str);
@@ -1766,6 +1768,7 @@ struct ProcessResult {
     circular_segments: u32,
     camera: Option<CameraState>,
     labels: Vec<Label>,
+    dims: Vec<Dim>,
     exports: Vec<String>,
     scene_ir: ir::SceneIr,
 }
@@ -1787,6 +1790,39 @@ struct LabelOp {
     x: f32,
     y: f32,
     z: f32,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DimSegment {
+    a: [f32; 3],
+    b: [f32; 3],
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DimArrow {
+    pos: [f32; 3],
+    dir: [f32; 3],
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DimLabel {
+    text: String,
+    x: f32,
+    y: f32,
+    z: f32,
+    size: f32,
+    color: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct Dim {
+    kind: String,
+    plane: String,
+    color: String,
+    arrow_len: f32,
+    segments: Vec<DimSegment>,
+    arrows: Vec<DimArrow>,
+    label: DimLabel,
 }
 
 fn process_single_file(
@@ -1945,6 +1981,92 @@ fn process_single_file(
         Vec::new()
     };
 
+    // Extract renderer-grade dimension callouts
+    let dims = if let Some(table) = result.as_table() {
+        if let Ok(dims_table) = table.get::<_, mlua::Table>("dims") {
+            let mut dims = Vec::new();
+            for dim_item in dims_table.sequence_values::<mlua::Table>() {
+                let Ok(dim_table) = dim_item else { continue };
+                let kind: String = dim_table
+                    .get("kind")
+                    .unwrap_or_else(|_| "linear".to_string());
+                let plane: String = dim_table.get("plane").unwrap_or_else(|_| "XZ".to_string());
+                let color: String = dim_table
+                    .get("color")
+                    .unwrap_or_else(|_| "#ffffff".to_string());
+                let arrow_len: f32 = dim_table.get("arrow_len").unwrap_or(1.8);
+
+                let mut segments: Vec<DimSegment> = Vec::new();
+                if let Ok(segs_table) = dim_table.get::<_, mlua::Table>("segments") {
+                    for seg_item in segs_table.sequence_values::<mlua::Table>() {
+                        let Ok(seg) = seg_item else { continue };
+                        let a_tbl: mlua::Table = seg.get("a")?;
+                        let b_tbl: mlua::Table = seg.get("b")?;
+                        let a = [
+                            a_tbl.get::<_, f32>(1).unwrap_or(0.0),
+                            a_tbl.get::<_, f32>(2).unwrap_or(0.0),
+                            a_tbl.get::<_, f32>(3).unwrap_or(0.0),
+                        ];
+                        let b = [
+                            b_tbl.get::<_, f32>(1).unwrap_or(0.0),
+                            b_tbl.get::<_, f32>(2).unwrap_or(0.0),
+                            b_tbl.get::<_, f32>(3).unwrap_or(0.0),
+                        ];
+                        segments.push(DimSegment { a, b });
+                    }
+                }
+
+                let mut arrows: Vec<DimArrow> = Vec::new();
+                if let Ok(arrows_table) = dim_table.get::<_, mlua::Table>("arrows") {
+                    for arrow_item in arrows_table.sequence_values::<mlua::Table>() {
+                        let Ok(arrow) = arrow_item else { continue };
+                        let pos_tbl: mlua::Table = arrow.get("pos")?;
+                        let dir_tbl: mlua::Table = arrow.get("dir")?;
+                        let pos = [
+                            pos_tbl.get::<_, f32>(1).unwrap_or(0.0),
+                            pos_tbl.get::<_, f32>(2).unwrap_or(0.0),
+                            pos_tbl.get::<_, f32>(3).unwrap_or(0.0),
+                        ];
+                        let dir = [
+                            dir_tbl.get::<_, f32>(1).unwrap_or(0.0),
+                            dir_tbl.get::<_, f32>(2).unwrap_or(0.0),
+                            dir_tbl.get::<_, f32>(3).unwrap_or(0.0),
+                        ];
+                        arrows.push(DimArrow { pos, dir });
+                    }
+                }
+
+                let label_tbl: mlua::Table = dim_table.get("label")?;
+                let label = DimLabel {
+                    text: label_tbl.get("text").unwrap_or_default(),
+                    x: label_tbl.get("x").unwrap_or(0.0),
+                    y: label_tbl.get("y").unwrap_or(0.0),
+                    z: label_tbl.get("z").unwrap_or(0.0),
+                    size: label_tbl.get("size").unwrap_or(5.0),
+                    color: label_tbl
+                        .get("color")
+                        .unwrap_or_else(|_| "#ffffff".to_string()),
+                };
+
+                dims.push(Dim {
+                    kind,
+                    plane,
+                    color,
+                    arrow_len,
+                    segments,
+                    arrows,
+                    label,
+                });
+            }
+            info!("Extracted {} dims", dims.len());
+            dims
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     Ok(ProcessResult {
         mesh,
         flat_shading,
@@ -1952,6 +2074,7 @@ fn process_single_file(
         circular_segments,
         camera,
         labels,
+        dims,
         exports,
         scene_ir,
     })
