@@ -89,6 +89,16 @@ impl From<AdHocShape> for Shape {
 }
 
 impl Shape {
+    /// Construct a Shape from an owned OCCT TopoDS_Shape.
+    /// This is useful when iterating sub-shapes (solids/faces) via FFI explorers.
+    pub fn from_topods_owned(inner: UniquePtr<ffi::TopoDS_Shape>) -> Self {
+        Self { inner }
+    }
+
+    pub fn as_topods(&self) -> Option<&ffi::TopoDS_Shape> {
+        self.inner.as_ref()
+    }
+
     pub fn shape_type(&self) -> ShapeType {
         self.inner.ShapeType().into()
     }

@@ -157,16 +157,24 @@ fn parse_mesh_stats(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((nv, ni))
 }
 
-fn mesh_step_cached_or_run(input: &PathBuf, deflection: f64) -> Result<(Vec<u8>, bool)> {
+fn mesh_step_cached_or_run<F>(
+    input: &PathBuf,
+    deflection: f64,
+    mut on_progress: F,
+) -> Result<(Vec<u8>, bool)>
+where
+    F: FnMut(&str, u32, u32),
+{
     let cache_path = step_mesh_cache_path(input, deflection)?;
     if let Ok(bytes) = std::fs::read(&cache_path) {
         // Minimal sanity check: [u32 num_vertices][u32 num_indices]
         if parse_mesh_stats(&bytes).is_some() {
+            on_progress("cache", 1, 1);
             return Ok((bytes, true));
         }
     }
 
-    let bytes = mesh_step_via_subprocess(input, deflection)?;
+    let bytes = mesh_step_via_subprocess(input, deflection, &mut on_progress)?;
 
     if parse_mesh_stats(&bytes).is_some() {
         let dir = step_mesh_cache_dir();
@@ -188,7 +196,14 @@ fn mesh_step_cached_or_run(input: &PathBuf, deflection: f64) -> Result<(Vec<u8>,
     Ok((bytes, false))
 }
 
-fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>> {
+fn mesh_step_via_subprocess<F>(
+    input: &PathBuf,
+    deflection: f64,
+    on_progress: &mut F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(&str, u32, u32),
+{
     let mesher = step_mesher_path()?;
 
     // Keep meshing isolated and bounded; OCCT can use huge amounts of memory on large assemblies.
@@ -201,7 +216,7 @@ fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>>
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let run_once = |disable_fixshape: bool| -> Result<Vec<u8>> {
+    let run_once = |disable_fixshape: bool, on_progress: &mut F| -> Result<Vec<u8>> {
         let mut cmd = if max_as_mb == 0 {
             std::process::Command::new(&mesher)
         } else {
@@ -245,7 +260,7 @@ fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>>
         );
         let out_path = tmp_dir.join(nonce);
 
-        let output = cmd
+        let mut output = cmd
             .arg("--deflection")
             .arg(deflection.to_string())
             .arg("--out")
@@ -253,22 +268,49 @@ fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>>
             .arg(input)
             // Some OCCT builds can emit diagnostics on stdout; avoid corrupting binary output.
             .stdout(std::process::Stdio::null())
-            .output()
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| {
                 anyhow::anyhow!("failed to spawn step mesher {}: {}", mesher.display(), e)
             })?;
 
-        if !output.status.success() {
+        let mut last_stderr_lines: std::collections::VecDeque<String> =
+            std::collections::VecDeque::new();
+        if let Some(stderr) = output.stderr.take() {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                // Keep a tail for debugging if the subprocess fails.
+                if last_stderr_lines.len() >= 80 {
+                    last_stderr_lines.pop_front();
+                }
+                last_stderr_lines.push_back(line.clone());
+
+                if let Some(rest) = line.strip_prefix("MITTENS_PROGRESS ") {
+                    // Expected: {"phase":"mesh_solids","done":10,"total":900}
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
+                        let phase = v.get("phase").and_then(|x| x.as_str()).unwrap_or("meshing");
+                        let done = v.get("done").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                        let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                        if total > 0 {
+                            on_progress(phase, done, total);
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = output.wait()?;
+        if !status.success() {
             let _ = std::fs::remove_file(&out_path);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr = if stderr.len() > 16 * 1024 {
-                format!("{}...[truncated]", &stderr[..16 * 1024])
-            } else {
-                stderr.to_string()
-            };
+            let mut stderr = last_stderr_lines.into_iter().collect::<Vec<_>>().join("\n");
+            if stderr.len() > 16 * 1024 {
+                stderr.truncate(16 * 1024);
+                stderr.push_str("...[truncated]");
+            }
             return Err(anyhow::anyhow!(
                 "step mesher failed (status={}) stderr={}",
-                output.status,
+                status,
                 stderr
             ));
         }
@@ -282,9 +324,9 @@ fn mesh_step_via_subprocess(input: &PathBuf, deflection: f64) -> Result<Vec<u8>>
     // Retry strategy:
     // 1) Default OCCT STEP import (includes ShapeFix)
     // 2) If that fails/crashes, retry with ShapeFix disabled
-    let bytes = match run_once(false) {
+    let bytes = match run_once(false, on_progress) {
         Ok(bytes) => bytes,
-        Err(e1) => match run_once(true) {
+        Err(e1) => match run_once(true, on_progress) {
             Ok(bytes) => bytes,
             Err(e2) => {
                 return Err(anyhow::anyhow!(
@@ -607,10 +649,34 @@ fn process_project_files(
                         "type": "status",
                         "state": "meshing",
                         "detail": coarse_hint,
+                        "progress": 0.0,
                     })
                     .to_string(),
                 );
-                match mesh_step_cached_or_run(&file_path, deflection_coarse) {
+                let mut emit_progress = |phase: &str, done: u32, total: u32| {
+                    let pct = if total > 0 {
+                        (done as f64 / total as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let detail = match phase {
+                        "cache" => "STEP coarse mesh cache hit".to_string(),
+                        "read_step" => format!("STEP reading STEP ({}/{})", done, total),
+                        "mesh_solids" => format!("STEP meshing solids ({}/{})", done, total),
+                        "write_mesh" => format!("STEP writing mesh ({}/{})", done, total),
+                        other => format!("STEP meshing ({other}) ({}/{})", done, total),
+                    };
+                    let _ = labels_tx.send(
+                        serde_json::json!({
+                            "type": "status",
+                            "state": "meshing",
+                            "detail": detail,
+                            "progress": pct,
+                        })
+                        .to_string(),
+                    );
+                };
+                match mesh_step_cached_or_run(&file_path, deflection_coarse, &mut emit_progress) {
                     Ok((mesh_binary, cache_hit)) => {
                         info!(
                             "STEP coarse mesh packet: {} bytes (deflection={}) cache_hit={}",
@@ -640,6 +706,7 @@ fn process_project_files(
                                 "type": "status",
                                 "state": "ready",
                                 "detail": "STEP coarse mesh ready",
+                                "progress": 1.0,
                             })
                             .to_string(),
                         );
@@ -652,6 +719,7 @@ fn process_project_files(
                                 "type": "status",
                                 "state": "error",
                                 "detail": format!("STEP meshing failed: {}", e),
+                                "progress": 0.0,
                             })
                             .to_string(),
                         );
@@ -665,10 +733,42 @@ fn process_project_files(
                             "type": "status",
                             "state": "meshing",
                             "detail": format!("STEP meshing (refine deflection={})", deflection_fine),
+                            "progress": 0.0,
                         })
                         .to_string(),
                     );
-                    match mesh_step_cached_or_run(&file_path, deflection_fine) {
+                    let mut emit_progress = |phase: &str, done: u32, total: u32| {
+                        let pct = if total > 0 {
+                            (done as f64 / total as f64).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let detail = match phase {
+                            "cache" => "STEP refined mesh cache hit".to_string(),
+                            "read_step" => {
+                                format!("STEP refined: reading STEP ({}/{})", done, total)
+                            }
+                            "mesh_solids" => {
+                                format!("STEP refined: meshing solids ({}/{})", done, total)
+                            }
+                            "write_mesh" => {
+                                format!("STEP refined: writing mesh ({}/{})", done, total)
+                            }
+                            other => {
+                                format!("STEP refined: meshing ({other}) ({}/{})", done, total)
+                            }
+                        };
+                        let _ = labels_tx.send(
+                            serde_json::json!({
+                                "type": "status",
+                                "state": "meshing",
+                                "detail": detail,
+                                "progress": pct,
+                            })
+                            .to_string(),
+                        );
+                    };
+                    match mesh_step_cached_or_run(&file_path, deflection_fine, &mut emit_progress) {
                         Ok((mesh_binary, cache_hit)) => {
                             info!(
                                 "STEP refined mesh packet: {} bytes (deflection={}) cache_hit={}",
@@ -698,6 +798,7 @@ fn process_project_files(
                                     "type": "status",
                                     "state": "ready",
                                     "detail": "STEP refined mesh ready",
+                                    "progress": 1.0,
                                 })
                                 .to_string(),
                             );
@@ -710,6 +811,7 @@ fn process_project_files(
                                     "type": "status",
                                     "state": "error",
                                     "detail": format!("STEP refine failed: {}", e),
+                                    "progress": 0.0,
                                 })
                                 .to_string(),
                             );

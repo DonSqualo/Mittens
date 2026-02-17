@@ -118,13 +118,30 @@ let last_backend_id_for_autoframe: string | null = null;
 const loading_bar_el = document.getElementById('loading-bar') as HTMLDivElement | null;
 const loading_text_el = document.getElementById('loading-bar-text') as HTMLDivElement | null;
 const loading_elapsed_el = document.getElementById('loading-bar-elapsed') as HTMLDivElement | null;
+const loading_fill_el = document.getElementById('loading-bar-fill') as HTMLDivElement | null;
 let loading_since_ms: number | null = null;
 let loading_timer: number | null = null;
 let loading_state: 'idle' | 'waiting' | 'meshing' | 'downloading' | 'applying' | 'error' = 'idle';
+let loading_progress: number | null = null;
+
+function set_loading_progress(p: number | null) {
+  loading_progress = (p === null) ? null : Math.max(0, Math.min(1, p));
+  if (!loading_bar_el || !loading_fill_el) return;
+  const determinate = loading_progress !== null;
+  loading_bar_el.classList.toggle('determinate', determinate);
+  if (determinate) {
+    // Keep a minimal visible fill so "0%" still looks alive.
+    const pct = Math.max(0.02, loading_progress!);
+    loading_fill_el.style.width = `${(pct * 100).toFixed(1)}%`;
+  } else {
+    loading_fill_el.style.width = '';
+  }
+}
 
 function set_loading_bar(
   state: 'idle' | 'waiting' | 'meshing' | 'downloading' | 'applying' | 'error',
-  detail?: string
+  detail?: string,
+  progress?: number
 ) {
   if (!loading_bar_el || !loading_text_el || !loading_elapsed_el) return;
 
@@ -133,6 +150,7 @@ function set_loading_bar(
   if (state === 'idle') {
     loading_bar_el.classList.remove('visible', 'state-error');
     loading_since_ms = null;
+    set_loading_progress(null);
     if (loading_timer) {
       window.clearInterval(loading_timer);
       loading_timer = null;
@@ -145,6 +163,7 @@ function set_loading_bar(
 
   loading_bar_el.classList.add('visible');
   loading_bar_el.classList.toggle('state-error', state === 'error');
+  set_loading_progress((typeof progress === 'number' && Number.isFinite(progress)) ? progress : null);
   loading_text_el.textContent = detail
     || (state === 'waiting' ? 'Waiting for model data...'
       : state === 'meshing' ? 'Meshing STEP...'
@@ -1514,7 +1533,8 @@ function update_status_display() {
             : loading_state === 'waiting' ? 'WAITING'
               : loading_state === 'error' ? 'ERROR'
                 : 'LOADING';
-      status_detail_el.textContent = `${label} ${s}s`;
+      const pct = (loading_progress !== null) ? ` ${(loading_progress * 100).toFixed(0)}%` : '';
+      status_detail_el.textContent = `${label}${pct} ${s}s`;
     } else {
       status_detail_el.textContent = override_active
         ? status_detail_override!.text
@@ -1691,15 +1711,16 @@ function connect_websocket() {
         } else if (msg.type === 'status') {
           const state = (typeof msg.state === 'string') ? msg.state : 'status';
           const detail = (typeof msg.detail === 'string') ? msg.detail : undefined;
+          const progress = (typeof msg.progress === 'number' && Number.isFinite(msg.progress)) ? msg.progress : undefined;
           if (DEBUG_WS) console.log(`[status] ${state}${detail ? `: ${detail}` : ''}`);
           // Keep using the existing HUD; map custom status to a detail line.
           update_status('connected', detail || state);
-          if (state === 'meshing') set_loading_bar('meshing', detail || 'Meshing STEP...');
+          if (state === 'meshing') set_loading_bar('meshing', detail || 'Meshing STEP...', progress);
           else if (state === 'ready') {
             // Don't hide here; many backends emit "ready" before the mesh packet arrives.
             // We'll hide after a real mesh payload is applied.
-            set_loading_bar('waiting', detail || 'Waiting for mesh...');
-          } else if (state === 'error') set_loading_bar('error', detail || 'Error');
+            set_loading_bar('waiting', detail || 'Waiting for mesh...', progress);
+          } else if (state === 'error') set_loading_bar('error', detail || 'Error', progress);
         }
       } catch (e) {
         console.warn('Failed to parse JSON message:', e);

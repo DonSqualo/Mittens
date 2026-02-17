@@ -214,6 +214,29 @@
       animation: loading-slide 1.2s linear infinite;
     }
 
+    #loading-bar.determinate #loading-bar-fill {
+      animation: none;
+      width: 0%;
+      transform: none;
+      background: repeating-linear-gradient(
+        90deg,
+        rgba(120, 255, 120, 0.95) 0px,
+        rgba(120, 255, 120, 0.95) 10px,
+        rgba(120, 255, 120, 0.65) 10px,
+        rgba(120, 255, 120, 0.65) 14px
+      );
+    }
+
+    #loading-bar.state-error.determinate #loading-bar-fill {
+      background: repeating-linear-gradient(
+        90deg,
+        rgba(255, 110, 110, 0.95) 0px,
+        rgba(255, 110, 110, 0.95) 10px,
+        rgba(255, 110, 110, 0.65) 10px,
+        rgba(255, 110, 110, 0.65) 14px
+      );
+    }
+
     #loading-bar.state-error #loading-bar-fill {
       background: linear-gradient(90deg, transparent, rgba(255, 110, 110, 0.85), transparent);
     }
