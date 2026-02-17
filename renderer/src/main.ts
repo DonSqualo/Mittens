@@ -40,6 +40,17 @@ controls.target.copy(DEFAULT_CAMERA.target);
 // Restore camera from localStorage (survives page reloads)
 if (RESET_CAMERA) {
   localStorage.removeItem(CAMERA_STORAGE_KEY);
+  // Also force a home reset at startup so a stale in-memory camera can't persist.
+  // This is especially useful for headless Playwright screenshots.
+  setTimeout(() => {
+    try {
+      // reset_camera is declared later; by the time this runs it exists.
+      // eslint-disable-next-line @typescript-eslint/no-use-before-define
+      reset_camera();
+    } catch (_) {
+      // ignore
+    }
+  }, 0);
 }
 const saved_camera = localStorage.getItem(CAMERA_STORAGE_KEY);
 if (saved_camera) {
@@ -1559,6 +1570,11 @@ function connect_websocket() {
   // (e.g. progressive STEP LODs). Only the latest pending buffer is applied each frame.
   let pending_binary: ArrayBuffer | null = null;
   let apply_scheduled = false;
+  const is_view_packet = (buf: ArrayBuffer): boolean => {
+    if (buf.byteLength < 4) return false;
+    const u8 = new Uint8Array(buf, 0, 4);
+    return u8[0] === 0x56 && u8[1] === 0x49 && u8[2] === 0x45 && u8[3] === 0x57; // 'V''I''E''W'
+  };
   const schedule_apply_binary = () => {
     if (apply_scheduled) return;
     apply_scheduled = true;
@@ -1598,6 +1614,12 @@ function connect_websocket() {
           }
         }
         console.log(`[ws] binary len=${event.data.byteLength} header8='${header8}' first16=[${Array.from(u8).join(',')}]${meshHint}`);
+      }
+      // View packets must be applied immediately to avoid being overwritten by the next mesh payload
+      // (binary updates are coalesced for progressive meshes).
+      if (is_view_packet(event.data)) {
+        update_mesh(event.data);
+        return;
       }
       if (try_handle_export_packet(event.data)) return;
       pending_binary = event.data;

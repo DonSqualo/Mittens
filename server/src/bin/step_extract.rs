@@ -3,12 +3,14 @@ use clap::{Parser, ValueEnum};
 use opencascade_sys::ffi;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum PickMode {
     /// Pick the solid with smallest volume/area (rough proxy for a thin plate).
     Thin,
     /// Pick the solid with largest volume.
     Largest,
+    /// Pick the solid (or repeated group member) with smallest bbox min-Y.
+    MinY,
 }
 
 #[derive(Debug, Parser)]
@@ -52,12 +54,24 @@ struct SolidInfo {
 }
 
 fn read_step_shape(path: &Path) -> Result<cxx::UniquePtr<ffi::TopoDS_Shape>> {
+    // Some STEP files can trigger OCCT FixShape crashes. Allow disabling it for this tool as well,
+    // matching the step_mesher behavior.
+    if std::env::var("MITTENS_STEP_DISABLE_FIXSHAPE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        let _ = ffi::interface_static_set_cval("FromSTEP.exec.op".to_string(), "".to_string());
+    }
+
     let mut reader = ffi::STEPControl_Reader_ctor();
     let status = ffi::read_step(reader.pin_mut(), path.to_string_lossy().to_string());
     if status != ffi::IFSelect_ReturnStatus::IFSelect_RetDone {
         bail!("failed to read STEP (status={:?})", status);
     }
-    reader.pin_mut().TransferRoots(&ffi::Message_ProgressRange_ctor());
+    reader
+        .pin_mut()
+        .TransferRoots(&ffi::Message_ProgressRange_ctor());
     Ok(ffi::one_shape(&reader))
 }
 
@@ -66,7 +80,9 @@ fn solid_info_for(shape: &ffi::TopoDS_Shape, idx: usize) -> Result<SolidInfo> {
     ffi::BRepGProp_VolumeProperties(shape, vol_props.pin_mut());
     let volume = vol_props.Mass();
     let com_p = ffi::GProp_GProps_CentreOfMass(&vol_props);
-    let com_p = com_p.as_ref().ok_or_else(|| anyhow!("failed to get center of mass"))?;
+    let com_p = com_p
+        .as_ref()
+        .ok_or_else(|| anyhow!("failed to get center of mass"))?;
     let com = (com_p.X(), com_p.Y(), com_p.Z());
 
     let mut area_props = ffi::GProp_GProps_ctor();
@@ -100,13 +116,45 @@ fn solid_info_for(shape: &ffi::TopoDS_Shape, idx: usize) -> Result<SolidInfo> {
     })
 }
 
+fn bbox_for(shape: &ffi::TopoDS_Shape) -> Result<Option<(f64, f64, f64, f64, f64, f64)>> {
+    let mut b = ffi::Bnd_Box_ctor();
+    let mut bpin = b.pin_mut();
+    ffi::BRepBndLib_Add(shape, bpin.as_mut());
+    let mut xmin = 0.0;
+    let mut ymin = 0.0;
+    let mut zmin = 0.0;
+    let mut xmax = 0.0;
+    let mut ymax = 0.0;
+    let mut zmax = 0.0;
+    let ok = ffi::Bnd_Box_Get(
+        b.as_ref().ok_or_else(|| anyhow!("null bbox"))?,
+        &mut xmin,
+        &mut ymin,
+        &mut zmin,
+        &mut xmax,
+        &mut ymax,
+        &mut zmax,
+    );
+    if ok {
+        Ok(Some((xmin, ymin, zmin, xmax, ymax, zmax)))
+    } else {
+        Ok(None)
+    }
+}
+
 fn q(v: f64) -> i64 {
     // Quantize to 1e-6 in model units; keeps identical solids together even if minor fp drift.
     (v * 1_000_000.0).round() as i64
 }
 
 fn signature(info: &SolidInfo) -> (i64, i64, i32, i32, i32) {
-    (q(info.volume), q(info.area), info.faces, info.edges, info.vertices)
+    (
+        q(info.volume),
+        q(info.area),
+        info.faces,
+        info.edges,
+        info.vertices,
+    )
 }
 
 fn list_and_pick(
@@ -117,24 +165,24 @@ fn list_and_pick(
 ) -> Result<(usize, Option<usize>)> {
     let mut explorer = ffi::TopExp_Explorer_ctor(shape, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
     let mut count = 0usize;
-
-    let mut best_idx: Option<usize> = None;
-    let mut best_metric: f64 = f64::INFINITY;
-    let mut best_volume: f64 = 0.0;
-
-    let mut sig_groups: std::collections::HashMap<(i64, i64, i32, i32, i32), Vec<SolidInfo>> =
-        std::collections::HashMap::new();
-
-    if do_list {
-        println!("# idx\tvolume\tarea\tfaces\tedges\tverts\tvol/area\tcom(x,y,z)");
-    }
+    let mut infos: Vec<SolidInfo> = Vec::new();
 
     while explorer.More() {
         let cur = explorer.Current();
         let info = solid_info_for(cur, count)?;
-        let ratio = if info.area > 1e-12 { info.volume / info.area } else { f64::NAN };
+        infos.push(info);
+        count += 1;
+        explorer.pin_mut().Next();
+    }
 
-        if do_list {
+    if do_list {
+        println!("# idx\tvolume\tarea\tfaces\tedges\tverts\tvol/area\tcom(x,y,z)");
+        for info in &infos {
+            let ratio = if info.area > 1e-12 {
+                info.volume / info.area
+            } else {
+                f64::NAN
+            };
             println!(
                 "{}\t{:.6e}\t{:.6e}\t{}\t{}\t{}\t{:.6e}\t({:.3},{:.3},{:.3})",
                 info.idx,
@@ -149,36 +197,48 @@ fn list_and_pick(
                 info.com.2
             );
         }
+    }
 
-        if repeated.is_some() {
+    let mut best_idx: Option<usize> = None;
+    if let Some(mode) = pick {
+        match mode {
+            PickMode::Largest => {
+                best_idx = infos
+                    .iter()
+                    .max_by(|a, b| {
+                        a.volume
+                            .partial_cmp(&b.volume)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|i| i.idx);
+            }
+            PickMode::Thin => {
+                best_idx = infos
+                    .iter()
+                    .filter(|i| i.area > 1e-12 && i.volume > 0.0)
+                    .min_by(|a, b| {
+                        let ra = a.volume / a.area;
+                        let rb = b.volume / b.area;
+                        ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|i| i.idx);
+            }
+            PickMode::MinY => {
+                // If the user asked for repeated groups, we'll pick among those (see below).
+            }
+        }
+    }
+
+    // Group repeated solids by signature.
+    let mut sig_groups: std::collections::HashMap<(i64, i64, i32, i32, i32), Vec<SolidInfo>> =
+        std::collections::HashMap::new();
+    if repeated.is_some() {
+        for info in &infos {
             sig_groups
-                .entry(signature(&info))
+                .entry(signature(info))
                 .or_default()
                 .push(info.clone());
         }
-
-        if let Some(mode) = pick {
-            match mode {
-                PickMode::Largest => {
-                    if best_idx.is_none() || info.volume > best_volume {
-                        best_volume = info.volume;
-                        best_idx = Some(info.idx);
-                    }
-                }
-                PickMode::Thin => {
-                    if info.area > 1e-12 && info.volume > 0.0 {
-                        let metric = info.volume / info.area;
-                        if metric < best_metric {
-                            best_metric = metric;
-                            best_idx = Some(info.idx);
-                        }
-                    }
-                }
-            }
-        }
-
-        count += 1;
-        explorer.pin_mut().Next();
     }
 
     if let Some(n) = repeated {
@@ -195,21 +255,87 @@ fn list_and_pick(
         groups.sort_by(|a, b| b.0.cmp(&a.0));
 
         println!("# repeated={} groups={}", n, groups.len());
+
+        let mut best_repeated_miny: f64 = f64::INFINITY;
+        let mut best_repeated_idx: Option<usize> = None;
+
+        // Only compute bboxes for the indices we care about (repeated groups), to avoid
+        // touching weird/invalid solids elsewhere in the STEP.
+        let mut candidate_idxs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (_cnt, _sig, infos) in &groups {
+            for i in infos {
+                candidate_idxs.insert(i.idx);
+            }
+        }
+
+        let mut bbox_by_idx: std::collections::HashMap<usize, (f64, f64, f64, f64, f64, f64)> =
+            std::collections::HashMap::new();
+        let mut explorer2 = ffi::TopExp_Explorer_ctor(shape, ffi::TopAbs_ShapeEnum::TopAbs_SOLID);
+        let mut idx2 = 0usize;
+        while explorer2.More() {
+            if candidate_idxs.contains(&idx2) {
+                let cur = explorer2.Current();
+                if let Ok(Some(bb)) = bbox_for(cur) {
+                    bbox_by_idx.insert(idx2, bb);
+                }
+            }
+            idx2 += 1;
+            explorer2.pin_mut().Next();
+        }
+
         for (_cnt, sig, mut infos) in groups {
             infos.sort_by(|a, b| a.idx.cmp(&b.idx));
             let idxs: Vec<String> = infos.iter().map(|i| i.idx.to_string()).collect();
             let sample = &infos[0];
+            let group_miny = infos
+                .iter()
+                .filter_map(|i| bbox_by_idx.get(&i.idx).map(|b| b.1))
+                .fold(f64::INFINITY, |a, b| a.min(b));
+            let group_maxy = infos
+                .iter()
+                .filter_map(|i| bbox_by_idx.get(&i.idx).map(|b| b.4))
+                .fold(f64::NEG_INFINITY, |a, b| a.max(b));
+
+            if let Some(mode) = pick {
+                if mode == PickMode::MinY && group_miny < best_repeated_miny {
+                    best_repeated_miny = group_miny;
+                    // Pick the specific instance that reaches most into -Y.
+                    best_repeated_idx = infos
+                        .iter()
+                        .filter_map(|i| bbox_by_idx.get(&i.idx).map(|b| (i.idx, b.1)))
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|x| x.0);
+                }
+            }
             println!(
-                "count={}\tvol={:.6e}\tarea={:.6e}\tfaces={}\tedges={}\tverts={}\tidxs=[{}]\tsig=({},{},{},{},{})",
+                "count={}\tvol={:.6e}\tarea={:.6e}\tfaces={}\tedges={}\tverts={}\tminy={:.6e}\tmaxy={:.6e}\tidxs=[{}]\tsig=({},{},{},{},{})",
                 n,
                 sample.volume,
                 sample.area,
                 sample.faces,
                 sample.edges,
                 sample.vertices,
+                group_miny,
+                group_maxy,
                 idxs.join(","),
                 sig.0, sig.1, sig.2, sig.3, sig.4
             );
+        }
+
+        // If the user asked to pick min-Y and also asked for repeated groups,
+        // prefer the repeated selection.
+        if pick == Some(PickMode::MinY) {
+            if let Some(idx) = best_repeated_idx {
+                if let Some(bb) = bbox_by_idx.get(&idx) {
+                    println!(
+                        "# pick=min-y idx={} bbox(xmin={:.6e},ymin={:.6e},zmin={:.6e},xmax={:.6e},ymax={:.6e},zmax={:.6e})",
+                        idx, bb.0, bb.1, bb.2, bb.3, bb.4, bb.5
+                    );
+                } else {
+                    println!("# pick=min-y idx={}", idx);
+                }
+                best_idx = Some(idx);
+            }
         }
     }
 
@@ -263,7 +389,9 @@ fn main() -> Result<()> {
     eprintln!("[step_extract] loading {}", cli.input.display());
     let shape = read_step_shape(&cli.input)
         .with_context(|| format!("failed to load STEP {}", cli.input.display()))?;
-    let shape_ref = shape.as_ref().ok_or_else(|| anyhow!("STEP reader produced null shape"))?;
+    let shape_ref = shape
+        .as_ref()
+        .ok_or_else(|| anyhow!("STEP reader produced null shape"))?;
     eprintln!("[step_extract] loaded STEP, scanning solids...");
 
     let (count, picked) = list_and_pick(shape_ref, cli.list, cli.pick, cli.repeated)?;
@@ -278,7 +406,10 @@ fn main() -> Result<()> {
     };
 
     if let Some(i) = export_idx {
-        let out_path = cli.out.as_ref().ok_or_else(|| anyhow!("--out is required for export"))?;
+        let out_path = cli
+            .out
+            .as_ref()
+            .ok_or_else(|| anyhow!("--out is required for export"))?;
         export_solid_by_index(shape_ref, i, out_path)
             .with_context(|| format!("failed to write {}", out_path.display()))?;
         eprintln!("wrote {}", out_path.display());

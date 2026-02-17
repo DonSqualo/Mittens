@@ -18,6 +18,7 @@
 #include <BRepGProp.hxx>
 #include <BRepGProp_Face.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -34,6 +35,7 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <GC_MakeSegment.hxx>
 #include <GProp_GProps.hxx>
+#include <Bnd_Box.hxx>
 #include <Geom2d_Ellipse.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -190,6 +192,17 @@ inline bool BRepLibBuildCurves3d(const TopoDS_Shape &shape) { return BRepLib::Bu
 
 inline bool interface_static_set_cval(rust::String key, rust::String value) {
   return Interface_Static::SetCVal(key.c_str(), value.c_str());
+}
+
+inline std::unique_ptr<Bnd_Box> Bnd_Box_ctor() { return std::unique_ptr<Bnd_Box>(new Bnd_Box()); }
+
+inline void BRepBndLib_Add(const TopoDS_Shape &shape, Bnd_Box &box) { BRepBndLib::Add(shape, box); }
+
+inline bool Bnd_Box_Get(const Bnd_Box &box, double &xmin, double &ymin, double &zmin, double &xmax, double &ymax,
+                        double &zmax) {
+  if (box.IsVoid()) return false;
+  box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+  return true;
 }
 
 inline void MakeThickSolidByJoin(BRepOffsetAPI_MakeThickSolid &make_thick_solid, const TopoDS_Shape &shape,

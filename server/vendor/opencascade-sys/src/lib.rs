@@ -97,6 +97,24 @@ pub mod ffi {
         pub fn shape_list_append_face(list: Pin<&mut TopTools_ListOfShape>, face: &TopoDS_Face);
         pub fn Size(self: &TopTools_ListOfShape) -> i32;
 
+        // Bounding box
+        type Bnd_Box;
+
+        #[cxx_name = "construct_unique"]
+        pub fn Bnd_Box_ctor() -> UniquePtr<Bnd_Box>;
+
+        pub fn BRepBndLib_Add(shape: &TopoDS_Shape, box_: Pin<&mut Bnd_Box>);
+
+        pub fn Bnd_Box_Get(
+            box_: &Bnd_Box,
+            xmin: &mut f64,
+            ymin: &mut f64,
+            zmin: &mut f64,
+            xmax: &mut f64,
+            ymax: &mut f64,
+            zmax: &mut f64,
+        ) -> bool;
+
         #[cxx_name = "list_to_vector"]
         pub fn shape_list_to_vector(
             list: &TopTools_ListOfShape,
