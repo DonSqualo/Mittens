@@ -1163,8 +1163,6 @@ dependencies = [
 [[package]]
 name = "manifold3d-sys"
 version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8edfdab009236117e6de0f6167fc2601efd4a2e40b9da0127cdf94025dcfa5b1"
 dependencies = [
  "bindgen",
  "cmake",

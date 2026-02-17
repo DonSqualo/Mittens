@@ -30,6 +30,7 @@ mod export;
 mod field;
 mod geometry;
 mod ir;
+mod occt_ir;
 mod nanovna;
 mod thread_primitives;
 
@@ -46,6 +47,7 @@ struct AppState {
     current_nanovna: RwLock<Option<Packet>>,
     current_labels: RwLock<Option<String>>,
     current_exports: RwLock<Vec<String>>,
+    current_scene: RwLock<Option<Arc<ir::SceneIr>>>,
     watched_file: String,
     git_branch: String,
     port: u16,
@@ -194,12 +196,14 @@ async fn main() -> Result<()> {
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Packet>();
     let (labels_result_tx, mut labels_result_rx) = mpsc::unbounded_channel::<String>();
     let (exports_result_tx, mut exports_result_rx) = mpsc::unbounded_channel::<Vec<String>>();
+    let (scene_result_tx, mut scene_result_rx) = mpsc::unbounded_channel::<Option<ir::SceneIr>>();
 
     // Lua processing thread (Manifold needs to run on same thread)
     let labels_tx_clone = labels_result_tx.clone();
     let exports_tx_clone = exports_result_tx.clone();
+    let scene_tx_clone = scene_result_tx.clone();
     thread::spawn(move || {
-        process_project_files(project_rx, result_tx, labels_tx_clone, exports_tx_clone);
+        process_project_files(project_rx, result_tx, labels_tx_clone, exports_tx_clone, scene_tx_clone);
     });
 
     let state = Arc::new(AppState {
@@ -213,6 +217,7 @@ async fn main() -> Result<()> {
         current_nanovna: RwLock::new(None),
         current_labels: RwLock::new(None),
         current_exports: RwLock::new(Vec::new()),
+        current_scene: RwLock::new(None),
         watched_file: file_path.display().to_string(),
         git_branch,
         port,
@@ -261,6 +266,13 @@ async fn main() -> Result<()> {
                 "files": exports
             });
             let _ = state_clone.exports_tx.send(exports_json.to_string());
+        }
+    });
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        while let Some(scene) = scene_result_rx.recv().await {
+            *state_clone.current_scene.write().await = scene.map(Arc::new);
         }
     });
 
@@ -330,6 +342,7 @@ fn process_project_files(
     tx: mpsc::UnboundedSender<Packet>,
     labels_tx: mpsc::UnboundedSender<String>,
     exports_tx: mpsc::UnboundedSender<Vec<String>>,
+    scene_tx: mpsc::UnboundedSender<Option<ir::SceneIr>>,
 ) {
     let lua = mlua::Lua::new();
 
@@ -385,6 +398,7 @@ fn process_project_files(
                     camera: None,
                     labels: Vec::new(),
                     exports: vec![file_name],
+                    scene_ir: ir::SceneIr { kind: "scene".to_string(), objects: Vec::new() },
                 })
             }
             cad_io::ProjectKind::Step => {
@@ -434,6 +448,7 @@ fn process_project_files(
                         );
                         let _ = tx.send(packet_from_vec(mesh_binary));
                         let _ = exports_tx.send(vec![file_name.clone()]);
+                        let _ = scene_tx.send(None);
                         let _ = labels_tx.send(
                             serde_json::json!({
                                 "type": "status",
@@ -445,6 +460,7 @@ fn process_project_files(
                     }
                     Err(e) => {
                         error!("STEP coarse meshing error: {}", e);
+                        let _ = scene_tx.send(None);
                         let _ = labels_tx.send(
                             serde_json::json!({
                                 "type": "status",
@@ -475,6 +491,7 @@ fn process_project_files(
                             );
                             let _ = tx.send(packet_from_vec(mesh_binary));
                             let _ = exports_tx.send(vec![file_name]);
+                            let _ = scene_tx.send(None);
                             let _ = labels_tx.send(
                                 serde_json::json!({
                                     "type": "status",
@@ -486,6 +503,7 @@ fn process_project_files(
                         }
                         Err(e) => {
                             error!("STEP refined meshing error: {}", e);
+                            let _ = scene_tx.send(None);
                             let _ = labels_tx.send(
                                 serde_json::json!({
                                     "type": "status",
@@ -505,6 +523,14 @@ fn process_project_files(
 
         match process_result {
             Ok(result) => {
+                match kind {
+                    cad_io::ProjectKind::Lua => {
+                        let _ = scene_tx.send(Some(result.scene_ir.clone()));
+                    }
+                    _ => {
+                        let _ = scene_tx.send(None);
+                    }
+                }
                 // Send view config first
                 let view_binary = serialize_view_config(result.flat_shading, result.show_edges, result.camera);
                 let _ = tx.send(packet_from_vec(view_binary));
@@ -531,7 +557,10 @@ fn process_project_files(
                     }
                 }
             }
-            Err(e) => error!("Project processing error: {}", e),
+            Err(e) => {
+                let _ = scene_tx.send(None);
+                error!("Project processing error: {}", e);
+            }
         }
 
         let Some(content) = lua_content.as_deref() else {
@@ -1347,6 +1376,7 @@ struct ProcessResult {
     camera: Option<CameraState>,
     labels: Vec<Label>,
     exports: Vec<String>,
+    scene_ir: ir::SceneIr,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1475,7 +1505,7 @@ fn process_single_file(lua: &mlua::Lua, content: &str, base_dir: &std::path::Pat
         Vec::new()
     };
 
-    Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels, exports })
+    Ok(ProcessResult { mesh, flat_shading, show_edges, circular_segments, camera, labels, exports, scene_ir })
 }
 
 async fn watch_file(path: PathBuf, tx: mpsc::UnboundedSender<PathBuf>) {
@@ -1650,6 +1680,104 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 if let Some(packet) = build_export_packet(&state.watched_file, &exports) {
                                     if sender.send(Message::Binary(packet.into())).await.is_err() {
                                         break;
+                                    }
+                                }
+                            } else if cmd.get("type").and_then(|v| v.as_str()) == Some("download_step") {
+                                let watched = PathBuf::from(&state.watched_file);
+                                let ext = watched
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| s.to_ascii_lowercase())
+                                    .unwrap_or_default();
+
+                                // If we're literally viewing a .step/.stp file, just download it.
+                                if ext == "step" || ext == "stp" {
+                                    match occt_ir::export_step_packet_for_file(&watched) {
+                                        Ok(packet) => {
+                                            if sender.send(Message::Binary(packet.into())).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = state.labels_tx.send(
+                                                serde_json::json!({
+                                                    "type": "status",
+                                                    "state": "error",
+                                                    "detail": format!("STEP download failed: {}", e),
+                                                })
+                                                .to_string(),
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                let out_filename = watched
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| format!("{}.step", s))
+                                    .unwrap_or_else(|| "assembly.step".to_string());
+
+                                let scene = state.current_scene.read().await.clone();
+                                let Some(scene) = scene else {
+                                    let _ = state.labels_tx.send(
+                                        serde_json::json!({
+                                            "type": "status",
+                                            "state": "error",
+                                            "detail": "No IR scene available for STEP export (try reloading the Lua file).",
+                                        })
+                                        .to_string(),
+                                    );
+                                    continue;
+                                };
+
+                                let _ = state.labels_tx.send(
+                                    serde_json::json!({
+                                        "type": "status",
+                                        "state": "exporting",
+                                        "detail": "Exporting STEP...",
+                                    })
+                                    .to_string(),
+                                );
+
+                                let packet = tokio::task::spawn_blocking(move || {
+                                    occt_ir::export_step_packet_for_scene(&scene, &out_filename)
+                                })
+                                .await;
+
+                                match packet {
+                                    Ok(Ok(packet)) => {
+                                        let _ = state.labels_tx.send(
+                                            serde_json::json!({
+                                                "type": "status",
+                                                "state": "ready",
+                                                "detail": "STEP export ready",
+                                            })
+                                            .to_string(),
+                                        );
+                                        if sender.send(Message::Binary(packet.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        let _ = state.labels_tx.send(
+                                            serde_json::json!({
+                                                "type": "status",
+                                                "state": "error",
+                                                "detail": format!("STEP export failed: {}", e),
+                                            })
+                                            .to_string(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = state.labels_tx.send(
+                                            serde_json::json!({
+                                                "type": "status",
+                                                "state": "error",
+                                                "detail": format!("STEP export task failed: {}", e),
+                                            })
+                                            .to_string(),
+                                        );
                                     }
                                 }
                             }

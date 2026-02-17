@@ -92,6 +92,7 @@ const circuit_anchor = new THREE.Vector3(0, 0, 60); // Anchor point above Z axis
 let circuit_visible = false;
 let circuit_width = 400; // Store circuit width for positioning
 const download_stl_btn = document.getElementById('download-stl-btn') as HTMLButtonElement | null;
+const download_step_btn = document.getElementById('download-step-btn') as HTMLButtonElement | null;
 let current_ws: WebSocket | null = null;
 let current_export_files: string[] = [];
 
@@ -467,6 +468,15 @@ function refresh_download_button_state() {
   set_download_button_enabled(current_export_files.length > 0);
 }
 
+function export_button_label(files: string[]): string {
+  if (files.length > 1) return 'ZIP';
+  const f = files[0]?.toLowerCase() || '';
+  if (f.endsWith('.step') || f.endsWith('.stp')) return 'STEP';
+  if (f.endsWith('.3mf')) return '3MF';
+  if (f.endsWith('.stl')) return 'STL';
+  return 'DL';
+}
+
 function try_handle_export_packet(buffer: ArrayBuffer): boolean {
   if (buffer.byteLength < 17) return false;
   const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 8));
@@ -486,9 +496,15 @@ function try_handle_export_packet(buffer: ArrayBuffer): boolean {
   if (buffer.byteLength < offset + payloadLen) return true;
   const payload = buffer.slice(offset, offset + payloadLen);
 
-  const blob = new Blob([payload], {
-    type: filename.toLowerCase().endsWith('.zip') ? 'application/zip' : 'model/stl'
-  });
+  const lower = filename.toLowerCase();
+  const mime = lower.endsWith('.zip')
+    ? 'application/zip'
+    : (lower.endsWith('.step') || lower.endsWith('.stp'))
+      ? 'model/step'
+      : lower.endsWith('.stl')
+        ? 'model/stl'
+        : 'application/octet-stream';
+  const blob = new Blob([payload], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -503,6 +519,11 @@ function try_handle_export_packet(buffer: ArrayBuffer): boolean {
 function request_export_download() {
   if (!current_ws || current_ws.readyState !== WebSocket.OPEN) return;
   current_ws.send(JSON.stringify({ type: 'download_exports' }));
+}
+
+function request_step_download() {
+  if (!current_ws || current_ws.readyState !== WebSocket.OPEN) return;
+  current_ws.send(JSON.stringify({ type: 'download_step' }));
 }
 
 // Plane type constants matching server
@@ -1491,6 +1512,7 @@ function connect_websocket() {
   ws.onopen = () => {
     console.log('WebSocket connected');
     update_status('connected', 'Waiting for data...');
+    if (download_step_btn) download_step_btn.disabled = false;
   };
 
   // Coalesce large binary updates so we don't thrash the UI if the server sends multiple meshes
@@ -1557,14 +1579,14 @@ function connect_websocket() {
             ? msg.exports.filter((v: unknown) => typeof v === 'string')
             : [];
           if (download_stl_btn) {
-            download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
+            download_stl_btn.textContent = export_button_label(current_export_files);
           }
           refresh_download_button_state();
           update_status('connected');
         } else if (msg.type === 'exports' && Array.isArray(msg.files)) {
           current_export_files = msg.files.filter((v: unknown) => typeof v === 'string');
           if (download_stl_btn) {
-            download_stl_btn.textContent = current_export_files.length > 1 ? 'ZIP' : 'STL';
+            download_stl_btn.textContent = export_button_label(current_export_files);
           }
           refresh_download_button_state();
         } else if (msg.type === 'status') {
@@ -1589,6 +1611,8 @@ function connect_websocket() {
     if (current_ws === ws) {
       current_ws = null;
     }
+    set_download_button_enabled(false);
+    if (download_step_btn) download_step_btn.disabled = true;
     setTimeout(connect_websocket, 2000);
   };
 
@@ -1745,7 +1769,11 @@ home_btn?.addEventListener('click', reset_camera);
 download_stl_btn?.addEventListener('click', () => {
   request_export_download();
 });
+download_step_btn?.addEventListener('click', () => {
+  request_step_download();
+});
 set_download_button_enabled(false);
+if (download_step_btn) download_step_btn.disabled = true;
 
 function is_typing_context(): boolean {
   const active = document.activeElement;

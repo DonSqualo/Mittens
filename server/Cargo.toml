@@ -61,3 +61,4 @@ debug = 0
 occt-sys = { path = "vendor/occt-sys" }
 opencascade-sys = { path = "vendor/opencascade-sys" }
 opencascade = { path = "vendor/opencascade" }
+manifold3d-sys = { path = "vendor/manifold3d-sys" }

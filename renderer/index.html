@@ -118,11 +118,17 @@
       background: rgba(0, 40, 0, 0.25);
     }
 
-    .download-stl-btn {
+    .download-buttons {
       position: absolute;
       right: 12px;
       bottom: 10px;
       z-index: 140;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .download-btn {
       border: 1px solid #0a5;
       background: rgba(0, 35, 0, 0.5);
       color: #9f9;
@@ -133,12 +139,12 @@
       cursor: pointer;
     }
 
-    .download-stl-btn:hover {
+    .download-btn:hover {
       background: rgba(0, 60, 0, 0.65);
       color: #cfc;
     }
 
-    .download-stl-btn:disabled {
+    .download-btn:disabled {
       border-color: #444;
       color: #666;
       background: rgba(20, 20, 20, 0.5);
@@ -275,7 +281,10 @@
       <div id="loading-bar-track"><div id="loading-bar-fill"></div></div>
       <div id="loading-bar-elapsed">0s</div>
     </div>
-    <button id="download-stl-btn" class="download-stl-btn" title="Download current mesh as STL" disabled>STL</button>
+    <div class="download-buttons">
+      <button id="download-stl-btn" class="download-btn" title="Download current export file(s)" disabled>STL</button>
+      <button id="download-step-btn" class="download-btn" title="Download a single STEP of the whole assembly" disabled>STEP</button>
+    </div>
     <div id="circuit-overlay"></div>
     
     <!-- Camera HUD -->

@@ -259,8 +259,18 @@ manifold_runtime_lib_dir() {
   echo "$DEFAULT_RUNTIME_DIR/lib/manifold"
 }
 
+manifold_prefix_lib_dir() {
+  local prefix="${MITTENS_MANIFOLD_PREFIX:-${HOME:-/tmp}/.local/manifold}"
+  echo "$prefix/lib"
+}
+
 occt_runtime_lib_dir() {
   echo "$DEFAULT_RUNTIME_DIR/lib/occt"
+}
+
+occt_prefix_lib_dir() {
+  local prefix="${MITTENS_OCCT_PREFIX:-${HOME:-/tmp}/.local/occt}"
+  echo "$prefix/lib"
 }
 
 backend_runtime_lib_dir_list() {
@@ -280,6 +290,28 @@ sync_manifold_runtime_libs_for_worktree() {
   local lib_dir
   lib_dir="$(manifold_runtime_lib_dir)"
   mkdir -p "$lib_dir"
+
+  # Prefer the pinned manifold install prefix if present (fast, stable).
+  local prefix_lib_dir
+  prefix_lib_dir="$(manifold_prefix_lib_dir)"
+  if [[ -d "$prefix_lib_dir" ]]; then
+    local copied=0
+    while IFS= read -r -d '' lib; do
+      local target base major
+      target="$(basename "$lib")"
+      cp -f "$lib" "$lib_dir/$target"
+      if [[ "$target" =~ ^(.+\\.so)\\.([0-9]+)\\.[0-9.]+$ ]]; then
+        base="${BASH_REMATCH[1]}"
+        major="${BASH_REMATCH[2]}"
+        ln -sfn "$target" "$lib_dir/$base.$major"
+        ln -sfn "$base.$major" "$lib_dir/$base"
+      fi
+      copied=1
+    done < <(find "$prefix_lib_dir" -type f -name 'libmanifold*.so*' -print0 2>/dev/null || true)
+    if [[ "$copied" == "1" ]]; then
+      return
+    fi
+  fi
 
   local build_root
   build_root="$(cargo_target_dir)/release/build"
@@ -310,6 +342,13 @@ sync_occt_runtime_libs_for_worktree() {
   local lib_dir
   lib_dir="$(occt_runtime_lib_dir)"
   mkdir -p "$lib_dir"
+
+  # Prefer pinned OCCT install prefix if present (fast, stable).
+  local prefix_lib_dir
+  prefix_lib_dir="$(occt_prefix_lib_dir)"
+  if [[ -d "$prefix_lib_dir" ]]; then
+    cp -a "$prefix_lib_dir/"*.so* "$lib_dir/" 2>/dev/null && return
+  fi
 
   local source_dir
   source_dir="$(find "$(cargo_target_dir)/release/build" -type d -path '*occt-sys-*/out/build/lin64/*/lib' 2>/dev/null | head -n 1 || true)"

@@ -19,14 +19,31 @@ fn main() {
     // Marker to avoid repeating expensive source builds.
     let marker = prefix_path.join(".mittens_occt_ok");
 
+    let has_any = |dir: &std::path::Path, prefix: &str| -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.starts_with(prefix) {
+                return true;
+            }
+        }
+        false
+    };
+
     let looks_installed = || {
         include_path.join("Standard_Version.hxx").is_file()
-            && lib_path.join("libTKernel.so").exists()
-            && lib_path.join("libTKMath.so").exists()
-            && lib_path.join("libTKBRep.so").exists()
-            && lib_path.join("libTKSTEP.so").exists()
-            && lib_path.join("libTKSTEPBase.so").exists()
-            && lib_path.join("libTKXSBase.so").exists()
+            // Prefer symlinks like libTKernel.so, but accept versioned libs too (libTKernel.so.7.x).
+            && has_any(&lib_path, "libTKernel.so")
+            && has_any(&lib_path, "libTKMath.so")
+            && has_any(&lib_path, "libTKBRep.so")
+            && has_any(&lib_path, "libTKSTEP.so")
+            && has_any(&lib_path, "libTKSTEPBase.so")
+            && has_any(&lib_path, "libTKXSBase.so")
     };
 
     if marker.is_file() && looks_installed() {
