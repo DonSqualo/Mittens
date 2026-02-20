@@ -193,9 +193,11 @@ fn upsert_backend(backends: &mut Vec<BackendEntry>, entry: BackendEntry) {
         .find(|existing| existing.backend_id == entry.backend_id)
     {
         *found = entry;
-        return;
+    } else {
+        backends.push(entry);
     }
-    backends.push(entry);
+
+    backends.sort_by(|a, b| a.backend_id.cmp(&b.backend_id));
 }
 
 fn get_backend<'a>(backends: &'a [BackendEntry], backend_id: &str) -> Option<&'a BackendEntry> {
@@ -279,4 +281,65 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str) -> BackendEntry {
+        BackendEntry {
+            backend_id: id.to_string(),
+            ws_url: format!("ws://{id}"),
+            project_file: None,
+            branch: None,
+            owner: None,
+            worktree: None,
+            backend_port: None,
+            pid: None,
+            updated_at_unix_ms: Some(123),
+        }
+    }
+
+    #[test]
+    fn upsert_backend_inserts_and_keeps_sorted_order() {
+        let mut backends = vec![entry("zeta"), entry("beta")];
+
+        upsert_backend(&mut backends, entry("alpha"));
+
+        let ids: Vec<&str> = backends.iter().map(|b| b.backend_id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "beta", "zeta"]);
+    }
+
+    #[test]
+    fn upsert_backend_updates_existing_entry_without_duplicates() {
+        let mut backends = vec![entry("alpha"), entry("beta")];
+
+        let mut updated = entry("beta");
+        updated.ws_url = "ws://new-beta".to_string();
+        updated.backend_port = Some(3100);
+
+        upsert_backend(&mut backends, updated);
+
+        assert_eq!(backends.len(), 2);
+        let beta = get_backend(&backends, "beta").expect("beta backend should exist");
+        assert_eq!(beta.ws_url, "ws://new-beta");
+        assert_eq!(beta.backend_port, Some(3100));
+    }
+
+    #[test]
+    fn parse_flag_args_rejects_non_flag_keys() {
+        let args = vec!["backend-id".to_string(), "abc".to_string()];
+        let err = parse_flag_args(args).expect_err("expected parse failure");
+        assert!(err.to_string().contains("invalid argument key"));
+    }
+
+    #[test]
+    fn parse_flag_args_requires_even_pairs() {
+        let args = vec!["--backend-id".to_string(), "abc".to_string(), "--ws-url".to_string()];
+        let err = parse_flag_args(args).expect_err("expected parse failure");
+        assert!(err
+            .to_string()
+            .contains("arguments must be '--key value' pairs"));
+    }
 }
