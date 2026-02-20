@@ -184,6 +184,49 @@ fn manifold_to_mesh_data(manifold: &Manifold) -> MeshData {
     data
 }
 
+fn mesh_data_to_manifold(mesh: &MeshData) -> Result<Manifold> {
+    let num_verts = mesh.positions.len() / 3;
+    let num_tris = mesh.indices.len() / 3;
+
+    if num_verts == 0 || num_tris == 0 {
+        return Err(anyhow!("mesh_file produced empty mesh"));
+    }
+
+    if mesh.positions.len() % 3 != 0 || mesh.indices.len() % 3 != 0 {
+        return Err(anyhow!("mesh_file has invalid buffer lengths"));
+    }
+
+    let mut vert_props: Vec<f32> = Vec::with_capacity(num_verts * 6);
+    for i in 0..num_verts {
+        vert_props.push(mesh.positions[i * 3]);
+        vert_props.push(mesh.positions[i * 3 + 1]);
+        vert_props.push(mesh.positions[i * 3 + 2]);
+
+        if mesh.normals.len() >= (i + 1) * 3 {
+            vert_props.push(mesh.normals[i * 3]);
+            vert_props.push(mesh.normals[i * 3 + 1]);
+            vert_props.push(mesh.normals[i * 3 + 2]);
+        } else {
+            vert_props.extend_from_slice(&[0.0, 0.0, 1.0]);
+        }
+    }
+
+    let manifold: Manifold = unsafe {
+        let mesh_ptr = manifold_meshgl(
+            manifold_alloc_meshgl(),
+            vert_props.as_ptr(),
+            num_verts,
+            6,
+            mesh.indices.as_ptr(),
+            num_tris,
+        );
+        let manifold_ptr = manifold_of_meshgl(manifold_alloc_manifold(), mesh_ptr);
+        std::mem::transmute(manifold_ptr)
+    };
+
+    Ok(manifold)
+}
+
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
@@ -385,6 +428,12 @@ fn build_manifold_primitive(obj_type: &str, params: &mlua::Table, circular_segme
             };
 
             Ok(result)
+        }
+        "mesh_file" => {
+            let path_str: String = params.get("path")?;
+            let mesh = cad_io::load_mesh_from_path(Path::new(&path_str))
+                .map_err(|e| anyhow!("failed to load mesh_file '{}': {}", path_str, e))?;
+            mesh_data_to_manifold(&mesh)
         }
         _ => Err(anyhow!("Unknown primitive type: {}", obj_type)),
     }
@@ -1108,6 +1157,19 @@ fn build_manifold_object_from_ir(
             .get(component_name)
             .ok_or_else(|| anyhow!("Component '{}' not found for instance", component_name))?;
         build_manifold_object_from_ir(lua, component, circular_segments, components)?
+    } else if obj.obj_type == "mesh_file" {
+        let params = obj
+            .params
+            .as_ref()
+            .ok_or_else(|| anyhow!("mesh_file missing params"))?;
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("mesh_file params.path must be a string"))?;
+
+        let mesh = cad_io::load_mesh_from_path(Path::new(path_str))
+            .map_err(|e| anyhow!("failed to load mesh_file '{}': {}", path_str, e))?;
+        mesh_data_to_manifold(&mesh)?
     } else {
         build_manifold_primitive_from_ir(lua, obj, circular_segments)?
     };
